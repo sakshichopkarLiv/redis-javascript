@@ -8,6 +8,8 @@ console.log("Logs from your program will appear here!");
 const server = net.createServer((connection) => {
   // Handle connection
   connection.on("data", (data) => {
+    const cmdArr = parseRESP(data);
+
     if (!cmdArr || !cmdArr[0]) return;
 
     const command = cmdArr[0].toLowerCase();
