@@ -8,8 +8,6 @@ console.log("Logs from your program will appear here!");
 const server = net.createServer((connection) => {
   // Handle connection
   connection.on("data", (data) => {
-    const cmdArr = parseRESP(data);
-
     if (!cmdArr || !cmdArr[0]) return;
 
     const command = cmdArr[0].toLowerCase();
@@ -22,13 +20,31 @@ const server = net.createServer((connection) => {
     } else if (command === "set") {
       const key = cmdArr[1];
       const value = cmdArr[2];
-      db[key] = value;
+
+      // Default: no expiry
+      let expiresAt = null;
+
+      // Check for PX (case-insensitive)
+      if (cmdArr.length >= 5 && cmdArr[3].toLowerCase() === "px") {
+        const px = parseInt(cmdArr[4], 10);
+        expiresAt = Date.now() + px;
+      }
+
+      db[key] = { value, expiresAt };
       connection.write("+OK\r\n");
     } else if (command === "get") {
       const key = cmdArr[1];
-      if (db[key] !== undefined) {
-        const value = db[key];
-        connection.write(`$${value.length}\r\n${value}\r\n`);
+      const record = db[key];
+
+      if (record) {
+        // If expired, delete and return null
+        if (record.expiresAt && Date.now() >= record.expiresAt) {
+          delete db[key];
+          connection.write("$-1\r\n");
+        } else {
+          const value = record.value;
+          connection.write(`$${value.length}\r\n${value}\r\n`);
+        }
       } else {
         // Null bulk string if key doesn't exist
         connection.write("$-1\r\n");
