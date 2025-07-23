@@ -290,12 +290,34 @@ const server = net.createServer((connection) => {
     } else if (command === "replconf") {
       connection.write("+OK\r\n");
       // Handler for SYNC or PSYNC
-    } else if (command === "psync" || command === "sync") {
-      // Respond with FULLRESYNC <ID> 0
+    } else if (command === "psync") {
+      // Send +FULLRESYNC <replid> 0\r\n
       connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
-      // Send empty RDB as a bulk string (NO trailing \r\n)
-      connection.write(`$${EMPTY_RDB.length}\r\n`);
-      connection.write(EMPTY_RDB);
+
+      // Prepare the correct empty RDB file buffer (version 11)
+      const emptyRDB = Buffer.from([
+        0x52,
+        0x45,
+        0x44,
+        0x49,
+        0x53, // REDIS
+        0x30,
+        0x30,
+        0x31,
+        0x31, // 0011
+        0xff, // End of RDB file
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00, // CRC64 (8 bytes)
+      ]);
+      connection.write(`$${emptyRDB.length}\r\n`);
+      connection.write(emptyRDB);
+      // Do NOT send \r\n after the binary file!
     }
   });
   connection.on("error", (err) => {
