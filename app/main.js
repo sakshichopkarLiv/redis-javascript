@@ -44,7 +44,6 @@ if (role === "slave" && masterHost && masterPort) {
   masterConnection.on("data", (data) => {
     if (handshakeStep === 0) {
       // 2. After receiving response to PING, send REPLCONF listening-port <PORT>
-      //     *3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n6380\r\n
       const portStr = port.toString();
       masterConnection.write(
         `*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$${portStr.length}\r\n${portStr}\r\n`
@@ -52,12 +51,18 @@ if (role === "slave" && masterHost && masterPort) {
       handshakeStep++;
     } else if (handshakeStep === 1) {
       // 3. After response, send REPLCONF capa psync2
-      //     *3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n
       masterConnection.write(
         "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
       );
       handshakeStep++;
+    } else if (handshakeStep === 2) {
+      // 4. After response, send PSYNC ? -1
+      masterConnection.write(
+        "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n"
+      );
+      handshakeStep++;
     }
+    // Done with handshake for this stage
   });
 
   masterConnection.on("error", (err) => {
@@ -191,7 +196,7 @@ const server = net.createServer((connection) => {
   connection.on("data", (data) => {
     // LOG what the master receives
     console.log("Master received:", data.toString());
-    
+
     const cmdArr = parseRESP(data);
     
     if (!cmdArr || !cmdArr[0]) return;
