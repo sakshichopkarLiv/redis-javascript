@@ -33,20 +33,37 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // Connect to master and send PING if replica
-  if (role === "slave" && masterHost && masterPort) {
-    const masterConnection = net.createConnection(
-      masterPort,
-      masterHost,
-      () => {
-        // Send RESP-encoded PING command
-        masterConnection.write("*1\r\n$4\r\nPING\r\n");
-      }
-    );
-    // (Optional) log errors for debugging
-    masterConnection.on("error", (err) => {
-      console.log("Error connecting to master:", err.message);
-    });
-  }
+if (role === "slave" && masterHost && masterPort) {
+  const masterConnection = net.createConnection(masterPort, masterHost, () => {
+    // 1. Send PING as RESP
+    masterConnection.write("*1\r\n$4\r\nPING\r\n");
+  });
+
+  let handshakeStep = 0;
+
+  masterConnection.on("data", (data) => {
+    if (handshakeStep === 0) {
+      // 2. After receiving response to PING, send REPLCONF listening-port <PORT>
+      //     *3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n6380\r\n
+      const portStr = port.toString();
+      masterConnection.write(
+        `*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$${portStr.length}\r\n${portStr}\r\n`
+      );
+      handshakeStep++;
+    } else if (handshakeStep === 1) {
+      // 3. After response, send REPLCONF capa psync2
+      //     *3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n
+      masterConnection.write(
+        "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
+      );
+      handshakeStep++;
+    }
+  });
+
+  masterConnection.on("error", (err) => {
+    console.log("Error connecting to master:", err.message);
+  });
+}
 
 // === RDB FILE LOADING START ===
 // Reads all key-value pairs (string type) from RDB, supports expiries
@@ -172,8 +189,11 @@ console.log("Logs from your program will appear here!");
 const server = net.createServer((connection) => {
   // Handle connection
   connection.on("data", (data) => {
+    // LOG what the master receives
+    console.log("Master received:", data.toString());
+    
     const cmdArr = parseRESP(data);
-
+    
     if (!cmdArr || !cmdArr[0]) return;
 
     const command = cmdArr[0].toLowerCase();
