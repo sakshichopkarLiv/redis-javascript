@@ -7,6 +7,7 @@ const db = {};
 let dir = "";
 let dbfilename = "";
 let port = 6379; // <-- default port
+let role = "master";
 
 const args = process.argv;
 for (let i = 0; i < args.length; i++) {
@@ -19,6 +20,9 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === "--port" && i + 1 < args.length) {
     // <-- support --port
     port = parseInt(args[i + 1], 10);
+  }
+  if (args[i] === "--replicaof" && i + 1 < args.length) {
+    role = "slave";
   }
 }
 
@@ -227,7 +231,7 @@ const server = net.createServer((connection) => {
       cmdArr[1] &&
       cmdArr[1].toLowerCase() === "replication"
     ) {
-      connection.write(`$11\r\nrole:master\r\n`);
+      connection.write(`$${("role:" + role).length}\r\nrole:${role}\r\n`);
     }
   });
   connection.on("error", (err) => {
