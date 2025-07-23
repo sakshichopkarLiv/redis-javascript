@@ -286,6 +286,10 @@ const server = net.createServer((connection) => {
       // === INFO replication handler END ===
     } else if (command === "replconf") {
       connection.write("+OK\r\n");
+    } else if (command === "psync") {
+      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
+    } else if (command === "sync") {
+      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
     }
   });
   connection.on("error", (err) => {
