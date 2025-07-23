@@ -18,7 +18,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // === RDB FILE LOADING START ===
-// Reads one key-value pair (string type) from RDB
+// Reads all key-value pairs (string type) from RDB
 function loadRDB(filepath) {
   if (!fs.existsSync(filepath)) {
     return;
@@ -38,6 +38,11 @@ function loadRDB(filepath) {
     // value
     let [val, valLen] = readRDBString(buffer, offset);
     offset += valLen;
+  }
+
+  // Scan until 0xFE (start of database section)
+  while (offset < buffer.length && buffer[offset] !== 0xfe) {
+    offset++;
   }
 
   // DB section starts with 0xFE
@@ -103,6 +108,7 @@ function readRDBString(buffer, offset) {
 // Try to load the RDB file!
 const rdbPath = path.join(dir, dbfilename);
 loadRDB(rdbPath);
+console.log("Loaded keys from RDB:", Object.keys(db)); // <-- For debugging, see what you loaded
 // === RDB FILE LOADING END ===
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
