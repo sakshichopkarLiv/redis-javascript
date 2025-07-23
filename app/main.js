@@ -9,6 +9,8 @@ let dir = "";
 let dbfilename = "";
 let port = 6379; // <-- default port
 let role = "master";
+let masterHost = null;
+let masterPort = null;
 
 const args = process.argv;
 for (let i = 0; i < args.length; i++) {
@@ -24,8 +26,27 @@ for (let i = 0; i < args.length; i++) {
   }
   if (args[i] === "--replicaof" && i + 1 < args.length) {
     role = "slave";
+    const [host, portStr] = args[i + 1].split(" ");
+    masterHost = host;
+    masterPort = parseInt(portStr, 10);
   }
 }
+
+// Connect to master and send PING if replica
+  if (role === "slave" && masterHost && masterPort) {
+    const masterConnection = net.createConnection(
+      masterPort,
+      masterHost,
+      () => {
+        // Send RESP-encoded PING command
+        masterConnection.write("*1\r\n$4\r\nPING\r\n");
+      }
+    );
+    // (Optional) log errors for debugging
+    masterConnection.on("error", (err) => {
+      console.log("Error connecting to master:", err.message);
+    });
+  }
 
 // === RDB FILE LOADING START ===
 // Reads all key-value pairs (string type) from RDB, supports expiries
