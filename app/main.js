@@ -16,7 +16,8 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === "--dbfilename" && i + 1 < args.length) {
     dbfilename = args[i + 1];
   }
-  if (args[i] === "--port" && i + 1 < args.length) { // <-- support --port
+  if (args[i] === "--port" && i + 1 < args.length) {
+    // <-- support --port
     port = parseInt(args[i + 1], 10);
   }
 }
@@ -75,11 +76,13 @@ function loadRDB(filepath) {
         let expiresAt = null;
 
         // Handle optional expiry before type
-        if (buffer[offset] === 0xFC) { // expiry in ms
+        if (buffer[offset] === 0xfc) {
+          // expiry in ms
           offset++;
           expiresAt = Number(buffer.readBigUInt64LE(offset));
           offset += 8;
-        } else if (buffer[offset] === 0xFD) { // expiry in s
+        } else if (buffer[offset] === 0xfd) {
+          // expiry in s
           offset++;
           expiresAt = buffer.readUInt32LE(offset) * 1000;
           offset += 4;
@@ -219,6 +222,12 @@ const server = net.createServer((connection) => {
         resp += `$${k.length}\r\n${k}\r\n`;
       }
       connection.write(resp);
+    } else if (
+      command === "info" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "replication"
+    ) {
+      connection.write(`$11\r\nrole:master\r\n`);
     }
   });
   connection.on("error", (err) => {
