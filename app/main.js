@@ -1,6 +1,20 @@
 const net = require("net");
 const db = {};
 
+// Get CLI args
+let dir = "";
+let dbfilename = "";
+
+const args = process.argv;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--dir" && i + 1 < args.length) {
+    dir = args[i + 1];
+  }
+  if (args[i] === "--dbfilename" && i + 1 < args.length) {
+    dbfilename = args[i + 1];
+  }
+}
+
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
 
@@ -51,7 +65,28 @@ const server = net.createServer((connection) => {
         // Null bulk string if key doesn't exist
         connection.write("$-1\r\n");
       }
+    } else if (
+      command === "config" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "get" &&
+      cmdArr[2]
+    ) {
+      const param = cmdArr[2].toLowerCase();
+      let value = "";
+      if (param === "dir") {
+        value = dir;
+      } else if (param === "dbfilename") {
+        value = dbfilename;
+      }
+      // RESP array of 2 bulk strings: [param, value]
+      connection.write(
+        `*2\r\n$${param.length}\r\n${param}\r\n$${value.length}\r\n${value}\r\n`
+      );
     }
+  });
+  connection.on("error", (err) => {
+    console.log("Socket error:", err.message);
+    // You can ignore or handle as needed, just don't throw
   });
 });
 
