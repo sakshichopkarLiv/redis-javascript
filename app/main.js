@@ -6,6 +6,7 @@ const db = {};
 // Get CLI args
 let dir = "";
 let dbfilename = "";
+let port = 6379; // <-- add default port
 
 const args = process.argv;
 for (let i = 0; i < args.length; i++) {
@@ -14,6 +15,9 @@ for (let i = 0; i < args.length; i++) {
   }
   if (args[i] === "--dbfilename" && i + 1 < args.length) {
     dbfilename = args[i + 1];
+  }
+  if (args[i] === "--port" && i + 1 < args.length) {   // <-- support --port
+    port = parseInt(args[i + 1], 10);
   }
 }
 
