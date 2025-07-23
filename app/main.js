@@ -18,7 +18,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // === RDB FILE LOADING START ===
-// Reads all key-value pairs (string type) from RDB
+// Reads all key-value pairs (string type) from RDB, supports expiries
 function loadRDB(filepath) {
   // Don't try to load if filepath is missing, doesn't exist, or is a directory!
   if (
@@ -66,8 +66,21 @@ function loadRDB(filepath) {
       let [expSize, expLen] = readRDBLength(buffer, offset);
       offset += expLen;
 
-      // Only handle string type and no expiry
+      // Only handle string type and expiry
       for (let i = 0; i < kvSize; ++i) {
+        let expiresAt = null;
+
+        // Handle optional expiry before type
+        if (buffer[offset] === 0xFC) { // expiry in ms
+          offset++;
+          expiresAt = Number(buffer.readBigUInt64LE(offset));
+          offset += 8;
+        } else if (buffer[offset] === 0xFD) { // expiry in s
+          offset++;
+          expiresAt = buffer.readUInt32LE(offset) * 1000;
+          offset += 4;
+        }
+
         let type = buffer[offset++];
         if (type !== 0) continue; // 0 means string type
 
@@ -75,7 +88,7 @@ function loadRDB(filepath) {
         offset += keyLen;
         let [val, valLen] = readRDBString(buffer, offset);
         offset += valLen;
-        db[key] = { value: val, expiresAt: null };
+        db[key] = { value: val, expiresAt };
       }
     }
   }
