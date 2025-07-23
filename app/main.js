@@ -57,9 +57,7 @@ if (role === "slave" && masterHost && masterPort) {
       handshakeStep++;
     } else if (handshakeStep === 2) {
       // 4. After response, send PSYNC ? -1
-      masterConnection.write(
-        "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n"
-      );
+      masterConnection.write("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n");
       handshakeStep++;
     }
   });
@@ -197,7 +195,7 @@ const server = net.createServer((connection) => {
     console.log("Master received:", data.toString());
 
     const cmdArr = parseRESP(data);
-    
+
     if (!cmdArr || !cmdArr[0]) return;
 
     const command = cmdArr[0].toLowerCase();
@@ -285,8 +283,10 @@ const server = net.createServer((connection) => {
       }
       const infoStr = lines.join("\r\n");
       connection.write(`$${infoStr.length}\r\n${infoStr}\r\n`);
+      // === INFO replication handler END ===
+    } else if (command === "replconf") {
+      connection.write("+OK\r\n");
     }
-    // === INFO replication handler END ===
   });
   connection.on("error", (err) => {
     console.log("Socket error:", err.message);
