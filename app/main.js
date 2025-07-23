@@ -20,7 +20,12 @@ for (let i = 0; i < args.length; i++) {
 // === RDB FILE LOADING START ===
 // Reads all key-value pairs (string type) from RDB
 function loadRDB(filepath) {
-  if (!fs.existsSync(filepath)) {
+  // Don't try to load if filepath is missing, doesn't exist, or is a directory!
+  if (
+    !filepath ||
+    !fs.existsSync(filepath) ||
+    !fs.statSync(filepath).isFile()
+  ) {
     return;
   }
   const buffer = fs.readFileSync(filepath);
@@ -105,10 +110,13 @@ function readRDBString(buffer, offset) {
   return [str, lenlen + strlen];
 }
 
-// Try to load the RDB file!
-const rdbPath = path.join(dir, dbfilename);
-loadRDB(rdbPath);
-console.log("Loaded keys from RDB:", Object.keys(db)); // <-- For debugging, see what you loaded
+// Try to load the RDB file only if dir and dbfilename are set!
+let rdbPath = "";
+if (dir && dbfilename) {
+  rdbPath = path.join(dir, dbfilename);
+  loadRDB(rdbPath);
+  // console.log("Loaded keys from RDB:", Object.keys(db)); // Uncomment for debug
+}
 // === RDB FILE LOADING END ===
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
