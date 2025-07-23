@@ -62,7 +62,6 @@ if (role === "slave" && masterHost && masterPort) {
       );
       handshakeStep++;
     }
-    // Done with handshake for this stage
   });
 
   masterConnection.on("error", (err) => {
