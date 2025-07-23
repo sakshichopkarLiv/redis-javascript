@@ -1,4 +1,6 @@
 const net = require("net");
+const fs = require("fs");
+const path = require("path");
 const db = {};
 
 // Get CLI args
@@ -14,6 +16,94 @@ for (let i = 0; i < args.length; i++) {
     dbfilename = args[i + 1];
   }
 }
+
+// === RDB FILE LOADING START ===
+// Reads one key-value pair (string type) from RDB
+function loadRDB(filepath) {
+  if (!fs.existsSync(filepath)) {
+    return;
+  }
+  const buffer = fs.readFileSync(filepath);
+  let offset = 0;
+
+  // Header: REDIS0011 (9 bytes)
+  offset += 9;
+
+  // Skip metadata sections (starts with 0xFA)
+  while (buffer[offset] === 0xfa) {
+    offset++; // skip FA
+    // name
+    let [name, nameLen] = readRDBString(buffer, offset);
+    offset += nameLen;
+    // value
+    let [val, valLen] = readRDBString(buffer, offset);
+    offset += valLen;
+  }
+
+  // DB section starts with 0xFE
+  if (buffer[offset] === 0xfe) {
+    offset++;
+    // db index (size encoded)
+    let [dbIndex, dbLen] = readRDBLength(buffer, offset);
+    offset += dbLen;
+    // Hash table size info: starts with FB
+    if (buffer[offset] === 0xfb) {
+      offset++;
+      // key-value hash table size
+      let [kvSize, kvSizeLen] = readRDBLength(buffer, offset);
+      offset += kvSizeLen;
+      // expiry hash table size (skip)
+      let [expSize, expLen] = readRDBLength(buffer, offset);
+      offset += expLen;
+
+      // Only handle string type and no expiry
+      for (let i = 0; i < kvSize; ++i) {
+        let type = buffer[offset++];
+        if (type !== 0) continue; // 0 means string type
+
+        let [key, keyLen] = readRDBString(buffer, offset);
+        offset += keyLen;
+        let [val, valLen] = readRDBString(buffer, offset);
+        offset += valLen;
+        db[key] = { value: val, expiresAt: null };
+      }
+    }
+  }
+}
+
+// Helper: read size-encoded int
+function readRDBLength(buffer, offset) {
+  let first = buffer[offset];
+  let type = first >> 6;
+  if (type === 0) {
+    return [first & 0x3f, 1];
+  } else if (type === 1) {
+    let val = ((first & 0x3f) << 8) | buffer[offset + 1];
+    return [val, 2];
+  } else if (type === 2) {
+    let val =
+      (buffer[offset + 1] << 24) |
+      (buffer[offset + 2] << 16) |
+      (buffer[offset + 3] << 8) |
+      buffer[offset + 4];
+    return [val, 5];
+  } else if (type === 3) {
+    return [0, 1];
+  }
+}
+
+// Helper: read string-encoded value
+function readRDBString(buffer, offset) {
+  let [strlen, lenlen] = readRDBLength(buffer, offset);
+  offset += lenlen;
+  let str = buffer.slice(offset, offset + strlen).toString();
+  return [str, lenlen + strlen];
+}
+
+// Try to load the RDB file!
+const rdbPath = path.join(dir, dbfilename);
+loadRDB(rdbPath);
+// === RDB FILE LOADING END ===
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
@@ -82,6 +172,22 @@ const server = net.createServer((connection) => {
       connection.write(
         `*2\r\n$${param.length}\r\n${param}\r\n$${value.length}\r\n${value}\r\n`
       );
+    } else if (command === "keys") {
+      const pattern = cmdArr[1];
+      let keys = [];
+      if (pattern === "*") {
+        keys = Object.keys(db);
+      } else if (pattern.endsWith("*")) {
+        const prefix = pattern.slice(0, -1);
+        keys = Object.keys(db).filter((k) => k.startsWith(prefix));
+      } else {
+        keys = Object.keys(db).filter((k) => k === pattern);
+      }
+      let resp = `*${keys.length}\r\n`;
+      for (const k of keys) {
+        resp += `$${k.length}\r\n${k}\r\n`;
+      }
+      connection.write(resp);
     }
   });
   connection.on("error", (err) => {
