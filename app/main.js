@@ -2,6 +2,7 @@ const net = require("net");
 const fs = require("fs");
 const path = require("path");
 const db = {};
+const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 
 // Get CLI args
 let dir = "";
@@ -226,17 +227,24 @@ const server = net.createServer((connection) => {
         resp += `$${k.length}\r\n${k}\r\n`;
       }
       connection.write(resp);
+      // === INFO replication handler START ===
     } else if (
       command === "info" &&
       cmdArr[1] &&
       cmdArr[1].toLowerCase() === "replication"
     ) {
-      connection.write(`$${("role:" + role).length}\r\nrole:${role}\r\n`);
+      let lines = [`role:${role}`];
+      if (role === "master") {
+        lines.push(`master_replid:${masterReplId}`);
+        lines.push(`master_repl_offset:0`);
+      }
+      const infoStr = lines.join("\r\n");
+      connection.write(`$${infoStr.length}\r\n${infoStr}\r\n`);
     }
+    // === INFO replication handler END ===
   });
   connection.on("error", (err) => {
     console.log("Socket error:", err.message);
-    // You can ignore or handle as needed, just don't throw
   });
 });
 
