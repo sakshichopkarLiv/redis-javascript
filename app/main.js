@@ -3,10 +3,9 @@ const fs = require("fs");
 const path = require("path");
 const db = {};
 const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
-const EMPTY_RDB_HEX = "524544495330303931ff00000000000000005ead15d6";
+const EMPTY_RDB_HEX =
+  "5245444953303039310a000000ff00000000000000000000b409a26a4aa8657b";
 const EMPTY_RDB = Buffer.from(EMPTY_RDB_HEX, "hex");
-
-
 
 // Get CLI args
 let dir = "";
@@ -290,15 +289,13 @@ const server = net.createServer((connection) => {
       // === INFO replication handler END ===
     } else if (command === "replconf") {
       connection.write("+OK\r\n");
-    } else if (command === "psync") {
-      // 1. Respond to PSYNC command for replication handshake
+      // Handler for SYNC or PSYNC
+    } else if (command === "psync" || command === "sync") {
+      // Respond with FULLRESYNC <ID> 0
       connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
-
-      // 2. Then send the empty RDB as a bulk string, no trailing \r\n!
+      // Send empty RDB as a bulk string (NO trailing \r\n)
       connection.write(`$${EMPTY_RDB.length}\r\n`);
       connection.write(EMPTY_RDB);
-    } else if (command === "sync") {
-      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
     }
   });
   connection.on("error", (err) => {
