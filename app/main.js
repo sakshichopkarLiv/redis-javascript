@@ -486,8 +486,12 @@ server = net.createServer((connection) => {
     } else if (command === "replconf") {
       connection.write("+OK\r\n");
       // Handler for SYNC or PSYNC
+      // If you add DEL or other write commands, add their propagation as above
     }
-    // If you add DEL or other write commands, add their propagation as above
+    if (command === "wait") {
+      // Always reply with :0\r\n (RESP integer 0)
+      connection.write(":0\r\n");
+    }
   });
   connection.on("error", (err) => {
     console.log("Socket error:", err.message);
