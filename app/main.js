@@ -537,6 +537,70 @@ server = net.createServer((connection) => {
       db[streamKey].entries.push({ id, ...pairs });
       connection.write(`$${id.length}\r\n${id}\r\n`);
       // ==== STREAM SUPPORT END ====
+    } else if (command === "xrange") {
+      // ==== XRANGE SUPPORT START ====
+      const streamKey = cmdArr[1];
+      let start = cmdArr[2];
+      let end = cmdArr[3];
+
+      // Check if stream exists and is a stream type
+      if (!db[streamKey] || db[streamKey].type !== "stream") {
+        // Return empty array if stream does not exist or is not a stream
+        connection.write("*0\r\n");
+        return;
+      }
+
+      // Parse start and end IDs (support shorthand like "0" for "0-0" and "0-9999999999999999999")
+      function parseId(idStr, isEnd) {
+        if (idStr.includes("-")) {
+          const [ms, seq] = idStr.split("-");
+          return [parseInt(ms, 10), parseInt(seq, 10)];
+        } else {
+          // If only milliseconds, default to 0 for start or MAX_SAFE_INTEGER for end
+          if (isEnd) {
+            return [parseInt(idStr, 10), Number.MAX_SAFE_INTEGER];
+          } else {
+            return [parseInt(idStr, 10), 0];
+          }
+        }
+      }
+      const [startMs, startSeq] = parseId(start, false);
+      const [endMs, endSeq] = parseId(end, true);
+
+      // Filter entries in the inclusive range
+      const result = [];
+      for (const entry of db[streamKey].entries) {
+        const [eMs, eSeq] = entry.id.split("-").map(Number);
+        // Compare IDs (start <= entry.id <= end)
+        const afterStart =
+          eMs > startMs || (eMs === startMs && eSeq >= startSeq);
+        const beforeEnd = eMs < endMs || (eMs === endMs && eSeq <= endSeq);
+        if (afterStart && beforeEnd) {
+          // Convert entry (id, ...fields) to expected RESP array format
+          const pairs = [];
+          for (const [k, v] of Object.entries(entry)) {
+            if (k === "id") continue;
+            pairs.push(k, v);
+          }
+          result.push([entry.id, pairs]);
+        }
+      }
+
+      // RESP encode
+      function encodeRespArrayDeep(arr) {
+        let resp = `*${arr.length}\r\n`;
+        for (const item of arr) {
+          if (Array.isArray(item)) {
+            resp += encodeRespArrayDeep(item);
+          } else {
+            resp += `$${item.length}\r\n${item}\r\n`;
+          }
+        }
+        return resp;
+      }
+
+      connection.write(encodeRespArrayDeep(result));
+      // ==== XRANGE SUPPORT END ====
     } else if (command === "type") {
       // === TYPE COMMAND SUPPORT (string/none/stream) ===
       const key = cmdArr[1];
