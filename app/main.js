@@ -437,17 +437,61 @@ server = net.createServer((connection) => {
         connection.write("$-1\r\n");
       }
     } else if (command === "xadd") {
-      // ==== STREAM SUPPORT START ====
+      // ==== STREAM SUPPORT START + VALIDATION ====
       const streamKey = cmdArr[1];
       const id = cmdArr[2];
+
+      // Validate id: must match <millisecondsTime>-<sequenceNumber>
+      if (!/^\d+-\d+$/.test(id)) {
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
+        return;
+      }
+      const [ms, seq] = id.split("-").map(Number);
+
+      // ID must be greater than 0-0
+      if (ms === 0 && seq === 0) {
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
+        return;
+      }
+      // ID must be at least 0-1 or higher
+      if (ms === 0 && seq < 1) {
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
+        return;
+      }
+
       // All remaining args are pairs: field1, value1, field2, value2...
       const pairs = {};
       for (let i = 3; i + 1 < cmdArr.length; i += 2) {
         pairs[cmdArr[i]] = cmdArr[i + 1];
       }
+
       if (!db[streamKey]) {
         db[streamKey] = { type: "stream", entries: [] };
+      } else {
+        // Validate the new ID is strictly greater than the last entry's ID
+        const entries = db[streamKey].entries;
+        if (entries.length > 0) {
+          const last = entries[entries.length - 1];
+          const [lastMs, lastSeq] = last.id.split("-").map(Number);
+
+          // Rules:
+          //   - ms must be > lastMs
+          //   - if ms == lastMs, seq must be > lastSeq
+          if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
+            connection.write(
+              "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+            );
+            return;
+          }
+        }
       }
+
       db[streamKey].entries.push({ id, ...pairs });
       connection.write(`$${id.length}\r\n${id}\r\n`);
       // ==== STREAM SUPPORT END ====
