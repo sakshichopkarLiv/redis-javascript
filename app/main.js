@@ -383,6 +383,25 @@ server = net.createServer((connection) => {
       resolveWAITs();
       return;
     }
+
+    // ===== HANDLE REPLCONF GETACK FROM REPLICA/CLIENT =====
+    if (
+      command === "replconf" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "getack"
+    ) {
+      // Respond with *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
+      const offsetStr = masterOffset.toString();
+      const resp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${offsetStr.length}\r\n${offsetStr}\r\n`;
+      connection.write(resp);
+      return;
+    }
+
+    // ===== ALWAYS REPLY TO OTHER REPLCONF COMMANDS WITH +OK =====
+    if (command === "replconf") {
+      connection.write("+OK\r\n");
+      return;
+    }
     // ==== CHANGES FOR REPLICATION END ====
 
     if (command === "ping") {
