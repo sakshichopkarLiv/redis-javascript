@@ -76,7 +76,7 @@ if (role === "slave" && masterHost && masterPort) {
       const str = data.toString();
       if (str.startsWith("+FULLRESYNC")) {
         // Find the $<n>\r\n for the RDB file
-        const idx = str.indexOf('\r\n$');
+        const idx = str.indexOf("\r\n$");
         if (idx !== -1) {
           const rest = str.slice(idx + 3);
           const match = rest.match(/^(\d+)\r\n/);
@@ -138,7 +138,6 @@ if (role === "slave" && masterHost && masterPort) {
     leftover = leftover.slice(offset);
   }
 
-  // Similar to your main command handler, but only for write commands
   function handleReplicaCommand(cmdArr) {
     if (!cmdArr || !cmdArr[0]) return;
     const command = cmdArr[0].toLowerCase();
@@ -151,6 +150,7 @@ if (role === "slave" && masterHost && masterPort) {
         expiresAt = Date.now() + px;
       }
       db[key] = { value, expiresAt };
+      console.log("[replica] SET from master:", key, value);
     }
     // Add DEL, etc if needed!
   }
@@ -159,14 +159,14 @@ if (role === "slave" && masterHost && masterPort) {
   function tryParseRESP(buf) {
     if (buf[0] !== 42) return [null, 0]; // not '*'
     const str = buf.toString();
-    const firstLineEnd = str.indexOf('\r\n');
+    const firstLineEnd = str.indexOf("\r\n");
     if (firstLineEnd === -1) return [null, 0];
     const numElems = parseInt(str.slice(1, firstLineEnd), 10);
     let elems = [];
     let cursor = firstLineEnd + 2;
     for (let i = 0; i < numElems; i++) {
       if (buf[cursor] !== 36) return [null, 0]; // not '$'
-      const lenLineEnd = buf.indexOf('\r\n', cursor);
+      const lenLineEnd = buf.indexOf("\r\n", cursor);
       if (lenLineEnd === -1) return [null, 0];
       const len = parseInt(buf.slice(cursor + 1, lenLineEnd).toString(), 10);
       const valStart = lenLineEnd + 2;
