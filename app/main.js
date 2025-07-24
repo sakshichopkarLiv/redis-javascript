@@ -574,10 +574,18 @@ server = net.createServer((connection) => {
         let found = [];
         for (let i = 0; i < req.streams.length; ++i) {
           const k = req.streams[i];
-          const lastId = req.ids[i];
+          let id = req.ids[i];
+          // ---- Handle $ for "new messages only" ----
+          if (id === "$") {
+            if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
+              id = db[k].entries[db[k].entries.length - 1].id;
+            } else {
+              id = "0-0";
+            }
+          }
           const arr = [];
           if (db[k] && db[k].type === "stream") {
-            let [lastMs, lastSeq] = lastId.split("-").map(Number);
+            let [lastMs, lastSeq] = id.split("-").map(Number);
             for (const entry of db[k].entries) {
               let [eMs, eSeq] = entry.id.split("-").map(Number);
               if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
@@ -675,29 +683,31 @@ server = net.createServer((connection) => {
       const streams = [];
       const ids = [];
       let s = streamsIdx + 1;
-      while (s < cmdArr.length && !cmdArr[s].includes("-")) {
+      while (
+        s < cmdArr.length &&
+        !cmdArr[s].includes("-") &&
+        cmdArr[s] !== "$"
+      ) {
         streams.push(cmdArr[s]);
         s++;
       }
       while (s < cmdArr.length) {
-        let xid = cmdArr[s];
-        if (xid === "$") {
-          const k = streams[ids.length];
-          if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
-            xid = db[k].entries[db[k].entries.length - 1].id;
-          } else {
-            xid = "0-0";
-          }
-        }
-        ids.push(xid);
+        ids.push(cmdArr[s]);
         s++;
       }
-
       // Find new entries for each stream
       let found = [];
       for (let i = 0; i < streams.length; ++i) {
         const k = streams[i];
-        const id = ids[i];
+        let id = ids[i];
+        // ---- Handle $ for "new messages only" ----
+        if (id === "$") {
+          if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
+            id = db[k].entries[db[k].entries.length - 1].id;
+          } else {
+            id = "0-0";
+          }
+        }
         const arr = [];
         if (db[k] && db[k].type === "stream") {
           let [lastMs, lastSeq] = id.split("-").map(Number);
