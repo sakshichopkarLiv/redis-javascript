@@ -356,7 +356,16 @@ server = net.createServer((connection) => {
     // ==== CHANGES FOR REPLICATION START ====
     // Detect if this is the replication connection
     if (command === "psync") {
-      // ... (unchanged code for PSYNC handshake)
+      connection.isReplica = true;
+      connection.lastAckOffset = 0;
+      replicaSockets.push(connection);
+
+      // 1. Send FULLRESYNC
+      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
+      // 2. Send empty RDB file as bulk string (version 11)
+      connection.write(`$${EMPTY_RDB.length}\r\n`);
+      connection.write(EMPTY_RDB);
+      // No extra \r\n after this!
       return;
     }
 
