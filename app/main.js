@@ -660,10 +660,17 @@ server = net.createServer((connection) => {
       const infoStr = lines.join("\r\n");
       connection.write(`$${infoStr.length}\r\n${infoStr}\r\n`);
       // === INFO replication handler END ===
-    } else if (command === "replconf") {
-      connection.write("+OK\r\n");
-      // Handler for SYNC or PSYNC
-      // If you add DEL or other write commands, add their propagation as above
+    } // ==== REPLCONF GETACK handler for master <--- ADD THIS BLOCK ====
+    if (
+      command === "replconf" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "getack"
+    ) {
+      // Respond with *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
+      const offsetStr = masterOffset.toString();
+      const resp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${offsetStr.length}\r\n${offsetStr}\r\n`;
+      connection.write(resp);
+      return;
     } else if (command === "wait") {
       // New: WAIT logic that supports offsets/acks!
       const numReplicas = parseInt(cmdArr[1], 10) || 0;
