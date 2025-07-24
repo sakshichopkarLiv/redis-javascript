@@ -119,12 +119,34 @@ if (role === "slave" && masterHost && masterPort) {
     console.log("Error connecting to master:", err.message);
   });
 
+  // ...inside the replica code (after leftover Buffer):
+  let masterOffset = 0; // <- ADD THIS
+
   function processLeftover() {
     let offset = 0;
     while (offset < leftover.length) {
       const [arr, bytesRead] = tryParseRESP(leftover.slice(offset));
       if (!arr) break;
-      handleReplicaCommand(arr);
+
+      const command = arr[0] && arr[0].toLowerCase();
+      // For REPLCONF GETACK, respond with offset *before* counting these bytes
+      if (
+        command === "replconf" &&
+        arr[1] &&
+        arr[1].toLowerCase() === "getack"
+      ) {
+        masterConnection.write(
+          "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" +
+            masterOffset.toString().length +
+            "\r\n" +
+            masterOffset +
+            "\r\n"
+        );
+        masterOffset += bytesRead; // count this command AFTER sending reply
+      } else {
+        masterOffset += bytesRead;
+        handleReplicaCommand(arr);
+      }
       offset += bytesRead;
     }
     leftover = leftover.slice(offset);
@@ -133,19 +155,7 @@ if (role === "slave" && masterHost && masterPort) {
   function handleReplicaCommand(cmdArr) {
     if (!cmdArr || !cmdArr[0]) return;
     const command = cmdArr[0].toLowerCase();
-    // --- handle REPLCONF GETACK * ---
-    if (
-      command === "replconf" &&
-      cmdArr[1] &&
-      cmdArr[1].toLowerCase() === "getack"
-    ) {
-      // Send REPLCONF ACK 0 as RESP array
-      masterConnection.write(
-        "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
-      );
-      return;
-    }
-    // --- existing SET logic etc below ---
+
     if (command === "set") {
       const key = cmdArr[1];
       const value = cmdArr[2];
