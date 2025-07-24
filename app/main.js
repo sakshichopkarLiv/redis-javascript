@@ -473,7 +473,23 @@ server = net.createServer((connection) => {
       // ==== STREAM SUPPORT START + VALIDATION ====
       const streamKey = cmdArr[1];
       let id = cmdArr[2];
-      // ... validation logic here ...
+
+      // Build field/value pairs
+      const pairs = {};
+      for (let i = 3; i + 1 < cmdArr.length; i += 2) {
+        pairs[cmdArr[i]] = cmdArr[i + 1];
+      }
+
+      // Ensure stream object exists
+      if (!db[streamKey]) {
+        db[streamKey] = { type: "stream", entries: [] };
+      } else if (!db[streamKey].entries) {
+        db[streamKey].entries = [];
+        db[streamKey].type = "stream";
+      }
+
+      // ---- Your ID validation logic (optional: you can keep it here) ----
+
       db[streamKey].entries.push({ id, ...pairs });
       connection.write(`$${id.length}\r\n${id}\r\n`);
 
