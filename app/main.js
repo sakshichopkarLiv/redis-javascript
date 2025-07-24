@@ -11,6 +11,7 @@ const EMPTY_RDB = Buffer.from([
 let masterOffset = 0; // Total number of bytes of write commands propagated
 let replicaSockets = []; // Store each replica connection with metadata
 let pendingWAITs = []; // Pending WAIT commands (from clients)
+let pendingXReads = []; // Pending XREAD BLOCK requests
 
 // Get CLI args
 let dir = "";
@@ -139,9 +140,7 @@ if (role === "slave" && masterHost && masterPort) {
         arr[1].toLowerCase() === "getack"
       ) {
         // RESP Array: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
-        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
-          masterOffset.toString().length
-        }\r\n${masterOffset}\r\n`;
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${masterOffset.toString().length}\r\n${masterOffset}\r\n`;
         masterConnection.write(ackResp);
         masterOffset += bytesRead; // Only update offset after sending
       } else {
@@ -327,6 +326,19 @@ function encodeRespArray(arr) {
   let resp = `*${arr.length}\r\n`;
   for (const val of arr) {
     resp += `$${val.length}\r\n${val}\r\n`;
+  }
+  return resp;
+}
+
+// Deep encoder for nested RESP arrays
+function encodeRespArrayDeep(arr) {
+  let resp = `*${arr.length}\r\n`;
+  for (const item of arr) {
+    if (Array.isArray(item)) {
+      resp += encodeRespArrayDeep(item);
+    } else {
+      resp += `$${item.length}\r\n${item}\r\n`;
+    }
   }
   return resp;
 }
@@ -555,6 +567,8 @@ server = net.createServer((connection) => {
 
       db[streamKey].entries.push({ id, ...pairs });
       connection.write(`$${id.length}\r\n${id}\r\n`);
+      // Fulfill any blocked XREADs on this stream, if possible
+      maybeFulfillBlockedXREADs(streamKey, { id, ...pairs });
       // ==== STREAM SUPPORT END ====
     } else if (command === "xrange") {
       // ==== XRANGE SUPPORT START ====
@@ -614,89 +628,73 @@ server = net.createServer((connection) => {
         }
       }
 
-      // RESP encode
-      function encodeRespArrayDeep(arr) {
-        let resp = `*${arr.length}\r\n`;
-        for (const item of arr) {
-          if (Array.isArray(item)) {
-            resp += encodeRespArrayDeep(item);
-          } else {
-            resp += `$${item.length}\r\n${item}\r\n`;
-          }
-        }
-        return resp;
-      }
-
       connection.write(encodeRespArrayDeep(result));
       // ==== XRANGE SUPPORT END ====
     } else if (command === "xread") {
-      // ==== XREAD SUPPORT START (MULTI-STREAM) ====
-      // Only support the form: XREAD STREAMS key1 key2 ... id1 id2 ...
-      const streamsIdx = cmdArr.findIndex((s) => s.toLowerCase() === "streams");
-      if (streamsIdx < 0 || streamsIdx + 1 >= cmdArr.length) {
+      // ==== XREAD WITH BLOCK SUPPORT ====
+      let blockMs = 0;
+      let blockIdx = cmdArr.findIndex((x) => x.toLowerCase() === "block");
+      let streamsIdx = cmdArr.findIndex((x) => x.toLowerCase() === "streams");
+      if (blockIdx !== -1) {
+        blockMs = parseInt(cmdArr[blockIdx + 1], 10);
+      }
+      if (streamsIdx === -1) {
         connection.write("*0\r\n");
         return;
       }
-
-      // Determine streams and IDs
-      // e.g., ... STREAMS s1 s2 ... id1 id2 ...
-      // streams: cmdArr[streamsIdx+1 .. streamsIdx+N]
-      // ids:     cmdArr[streamsIdx+1+N .. ]
-      const streamsAndIds = cmdArr.slice(streamsIdx + 1);
-      const half = Math.floor(streamsAndIds.length / 2);
-      const streamKeys = streamsAndIds.slice(0, half);
-      const lastIds = streamsAndIds.slice(half);
-
-      // Safety: If streams count doesn't match IDs, reply with empty
-      if (streamKeys.length !== lastIds.length) {
+      // Get stream keys and IDs
+      const streams = [];
+      const ids = [];
+      let s = streamsIdx + 1;
+      while (s < cmdArr.length && !cmdArr[s].includes("-")) {
+        streams.push(cmdArr[s]);
+        s++;
+      }
+      while (s < cmdArr.length) {
+        ids.push(cmdArr[s]);
+        s++;
+      }
+      // Find new entries for each stream
+      let found = [];
+      for (let i = 0; i < streams.length; ++i) {
+        const k = streams[i];
+        const id = ids[i];
+        const arr = [];
+        if (db[k] && db[k].type === "stream") {
+          let [lastMs, lastSeq] = id.split("-").map(Number);
+          for (const entry of db[k].entries) {
+            let [eMs, eSeq] = entry.id.split("-").map(Number);
+            if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+              let fields = [];
+              for (let [kk, vv] of Object.entries(entry))
+                if (kk !== "id") fields.push(kk, vv);
+              arr.push([entry.id, fields]);
+            }
+          }
+        }
+        if (arr.length) found.push([k, arr]);
+      }
+      if (found.length) {
+        connection.write(encodeRespArrayDeep(found));
+        return;
+      }
+      if (!blockMs) {
         connection.write("*0\r\n");
         return;
       }
+      // Otherwise, block this client
+      const timeout = setTimeout(() => {
+        connection.write("$-1\r\n");
+        pendingXReads = pendingXReads.filter((obj) => obj.conn !== connection);
+      }, blockMs);
 
-      const multiResult = [];
-      for (let i = 0; i < streamKeys.length; ++i) {
-        const streamKey = streamKeys[i];
-        const lastId = lastIds[i];
-        if (!db[streamKey] || db[streamKey].type !== "stream") {
-          continue; // skip missing streams
-        }
-        const stream = db[streamKey].entries;
-        const [lastMs, lastSeq] = lastId.split("-").map(Number);
-
-        const entries = [];
-        for (const entry of stream) {
-          const [eMs, eSeq] = entry.id.split("-").map(Number);
-          if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
-            const pairs = [];
-            for (const [k, v] of Object.entries(entry)) {
-              if (k === "id") continue;
-              pairs.push(k, v);
-            }
-            entries.push([entry.id, pairs]);
-          }
-        }
-        if (entries.length > 0) {
-          multiResult.push([streamKey, entries]);
-        }
-      }
-
-      if (multiResult.length === 0) {
-        connection.write("*0\r\n");
-      } else {
-        function encodeRespArrayDeep(arr) {
-          let resp = `*${arr.length}\r\n`;
-          for (const item of arr) {
-            if (Array.isArray(item)) {
-              resp += encodeRespArrayDeep(item);
-            } else {
-              resp += `$${item.length}\r\n${item}\r\n`;
-            }
-          }
-          return resp;
-        }
-        connection.write(encodeRespArrayDeep(multiResult));
-      }
-      // ==== XREAD SUPPORT END ====
+      pendingXReads.push({
+        conn: connection,
+        streams,
+        ids,
+        timer: timeout,
+      });
+      // ==== XREAD BLOCK SUPPORT END ====
     } else if (command === "type") {
       // === TYPE COMMAND SUPPORT (string/none/stream) ===
       const key = cmdArr[1];
@@ -783,6 +781,8 @@ server = net.createServer((connection) => {
       replicaSockets = replicaSockets.filter((sock) => sock !== connection);
       resolveWAITs();
     }
+    // Clean up pending XREADs for closed connections
+    pendingXReads = pendingXReads.filter((p) => p.conn !== connection);
   });
 });
 
@@ -856,4 +856,27 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
 // Call this function after "any" replica ACK is received
 function resolveWAITs() {
   pendingWAITs.forEach((w) => w.maybeResolve());
+}
+
+// Fulfill blocked XREADs on this stream
+function maybeFulfillBlockedXREADs(streamKey, newEntry) {
+  for (let i = 0; i < pendingXReads.length; ++i) {
+    let p = pendingXReads[i];
+    let idx = p.streams.indexOf(streamKey);
+    if (idx === -1) continue;
+    let [lastMs, lastSeq] = p.ids[idx].split("-").map(Number);
+    let [eMs, eSeq] = newEntry.id.split("-").map(Number);
+    if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+      // Compose reply just like normal XREAD for this stream only
+      let fields = [];
+      for (let [k, v] of Object.entries(newEntry))
+        if (k !== "id") fields.push(k, v);
+      let reply = [[streamKey, [[newEntry.id, fields]]]];
+      p.conn.write(encodeRespArrayDeep(reply));
+      clearTimeout(p.timer);
+      pendingXReads[i] = null;
+    }
+  }
+  // Remove any that were fulfilled
+  pendingXReads = pendingXReads.filter(Boolean);
 }
