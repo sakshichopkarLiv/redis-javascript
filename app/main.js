@@ -680,9 +680,19 @@ server = net.createServer((connection) => {
         s++;
       }
       while (s < cmdArr.length) {
-        ids.push(cmdArr[s]);
+        let xid = cmdArr[s];
+        if (xid === "$") {
+          const k = streams[ids.length];
+          if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
+            xid = db[k].entries[db[k].entries.length - 1].id;
+          } else {
+            xid = "0-0";
+          }
+        }
+        ids.push(xid);
         s++;
       }
+
       // Find new entries for each stream
       let found = [];
       for (let i = 0; i < streams.length; ++i) {
