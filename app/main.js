@@ -584,7 +584,7 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
   pendingWAITs.push(waitObj);
 }
 
-// Call this function after *any* replica ACK is received
+// Call this function after "any" replica ACK is received
 function resolveWAITs() {
   pendingWAITs.forEach(w => w.maybeResolve());
 }
