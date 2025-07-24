@@ -119,34 +119,34 @@ if (role === "slave" && masterHost && masterPort) {
     console.log("Error connecting to master:", err.message);
   });
 
-  // ...inside the replica code (after leftover Buffer):
-  let masterOffset = 0; // <- ADD THIS
+  // At the top of the replica section:
+  let masterOffset = 0; // Track the total bytes processed
 
   function processLeftover() {
     let offset = 0;
     while (offset < leftover.length) {
       const [arr, bytesRead] = tryParseRESP(leftover.slice(offset));
-      if (!arr) break;
+      if (!arr || bytesRead === 0) break;
 
       const command = arr[0] && arr[0].toLowerCase();
-      // For REPLCONF GETACK, respond with offset *before* counting these bytes
+
+      // Handle REPLCONF GETACK *
       if (
         command === "replconf" &&
         arr[1] &&
         arr[1].toLowerCase() === "getack"
       ) {
-        masterConnection.write(
-          "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" +
-            masterOffset.toString().length +
-            "\r\n" +
-            masterOffset +
-            "\r\n"
-        );
-        masterOffset += bytesRead; // count this command AFTER sending reply
+        // RESP Array: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
+          masterOffset.toString().length
+        }\r\n${masterOffset}\r\n`;
+        masterConnection.write(ackResp);
+        masterOffset += bytesRead; // Only update offset after sending
       } else {
         masterOffset += bytesRead;
-        handleReplicaCommand(arr);
+        handleReplicaCommand(arr); // Handles SET, etc, silently
       }
+
       offset += bytesRead;
     }
     leftover = leftover.slice(offset);
