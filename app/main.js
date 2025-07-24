@@ -3,24 +3,22 @@ const fs = require("fs");
 const path = require("path");
 
 // === IN-MEMORY DATABASE ===
-// All data, streams, expiries, etc. live in this object.
-const db = {};
+const db = {}; // All data, streams, expiries, etc. live in this object
 
 // === REPLICATION ID ===
-// Used for FULLRESYNC response in replication handshake.
 const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 
-// Minimal empty RDB binary used for FULLRESYNC bulk transfer.
+// Minimal empty RDB binary used for FULLRESYNC bulk transfer
 const EMPTY_RDB = Buffer.from([
   0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xff, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
 
 // === REPLICATION / WAIT SUPPORT ===
-let masterOffset = 0; // Tracks how many bytes we've sent to replicas.
-let replicaSockets = []; // All active replica connections.
-let pendingWAITs = []; // All WAIT requests still waiting for ACKs.
-let pendingXReads = []; // All XREAD BLOCK requests still pending.
+let masterOffset = 0; // Tracks how many bytes we've sent to replicas
+let replicaSockets = []; // All active replica connections
+let pendingWAITs = []; // All WAIT requests still waiting for ACKs
+let pendingXReads = []; // All XREAD BLOCK requests still pending
 
 // === CLI ARGUMENTS ===
 let dir = "";
@@ -51,17 +49,15 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // ==== REPLICA MODE: Connect to Master, Sync Data, Apply Commands ====
-// This section only runs if started as a replica/slave.
 if (role === "slave" && masterHost && masterPort) {
   const masterConnection = net.createConnection(masterPort, masterHost, () => {
-    // Start handshake: send PING
-    masterConnection.write("*1\r\n$4\r\nPING\r\n");
+    masterConnection.write("*1\r\n$4\r\nPING\r\n"); // Start handshake: send PING
   });
 
   let handshakeStep = 0;
-  let awaitingRDB = false; // Are we currently reading RDB data?
-  let rdbBytesExpected = 0; // Bytes to expect for RDB
-  let leftover = Buffer.alloc(0); // Buffer for command parsing
+  let awaitingRDB = false;
+  let rdbBytesExpected = 0;
+  let leftover = Buffer.alloc(0);
 
   masterConnection.on("data", (data) => {
     if (handshakeStep === 0) {
@@ -134,7 +130,7 @@ if (role === "slave" && masterHost && masterPort) {
     console.log("Error connecting to master:", err.message);
   });
 
-  // RESP parser: Accumulates data, applies each command as soon as possible.
+  // RESP parser: Accumulates data, applies each command as soon as possible
   function processLeftover() {
     let offset = 0;
     while (offset < leftover.length) {
@@ -149,9 +145,7 @@ if (role === "slave" && masterHost && masterPort) {
         arr[1] &&
         arr[1].toLowerCase() === "getack"
       ) {
-        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
-          masterOffset.toString().length
-        }\r\n${masterOffset}\r\n`;
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${masterOffset.toString().length}\r\n${masterOffset}\r\n`;
         masterConnection.write(ackResp);
         masterOffset += bytesRead;
       } else {
@@ -208,7 +202,6 @@ if (role === "slave" && masterHost && masterPort) {
 // ==== END OF REPLICA MODE ====
 
 // === RDB FILE LOADING SUPPORT ===
-// Loads simple key-value pairs (and expiries) from an RDB file on disk.
 function loadRDB(filepath) {
   if (
     !filepath ||
@@ -264,7 +257,7 @@ function loadRDB(filepath) {
   }
 }
 
-// Helpers to read Redis RDB length-encoded types and strings.
+// Helpers to read Redis RDB length-encoded types and strings
 function readRDBLength(buffer, offset) {
   let first = buffer[offset];
   let type = first >> 6;
@@ -292,14 +285,14 @@ function readRDBString(buffer, offset) {
   return [str, lenlen + strlen];
 }
 
-// If --dir and --dbfilename are set, load from disk on startup.
+// If --dir and --dbfilename are set, load from disk on startup
 let rdbPath = "";
 if (dir && dbfilename) {
   rdbPath = path.join(dir, dbfilename);
   loadRDB(rdbPath);
 }
 
-// Print statements are visible in the test logs.
+// Print statements are visible in the test logs
 console.log("Logs from your program will appear here!");
 
 // === RESP ENCODERS (used everywhere) ===
@@ -326,7 +319,7 @@ function encodeRespInteger(n) {
 }
 
 // === MAIN TCP SERVER: All Client/Replica Logic ===
-server = net.createServer((connection) => {
+const server = net.createServer((connection) => {
   connection.isReplica = false;
   connection.lastAckOffset = 0;
 
@@ -339,12 +332,9 @@ server = net.createServer((connection) => {
 
     let offset = 0;
     while (offset < connection.leftover.length) {
-      const [cmdArr, bytesRead] = tryParseRESP(
-        connection.leftover.slice(offset)
-      );
+      const [cmdArr, bytesRead] = tryParseRESP(connection.leftover.slice(offset));
       if (!cmdArr || bytesRead === 0) break;
 
-      // ---- BEGIN your command logic ----
       const command = cmdArr[0].toLowerCase();
 
       // ==== REPLICATION HANDSHAKE ====
@@ -413,25 +403,19 @@ server = net.createServer((connection) => {
         // Begin a new transaction (queuing is not required yet)
         connection.inTransaction = true;
         connection.write("+OK\r\n");
-        offset += bytesRead;
-        continue;
+        return;
       }
 
       // --- MULTI/EXEC Transaction Handling ---
       if (command === "exec") {
         if (!connection.inTransaction) {
           connection.write("-ERR EXEC without MULTI\r\n");
-          offset += bytesRead;
-          continue;
+          return;
         }
-        connection.inTransaction = false; // End transaction mode
+        connection.inTransaction = false;
         connection.write("*0\r\n"); // RESP empty array (no commands queued)
-        offset += bytesRead;
-        continue;
-      }
-
-      // Other commands (GET, INCR, etc.)
-      if (command === "get") {
+        return;
+      } else if (command === "get") {
         const key = cmdArr[1];
         const record = db[key];
         if (record) {
@@ -448,17 +432,14 @@ server = net.createServer((connection) => {
       } else if (command === "incr") {
         const key = cmdArr[1];
         if (db[key] === undefined) {
-          // Key does not exist: set to 1
           db[key] = { value: "1", type: "string" };
           connection.write(encodeRespInteger(1));
         } else if (db[key].type === "string" && /^-?\d+$/.test(db[key].value)) {
-          // Key exists and value is integer: increment
           let num = parseInt(db[key].value, 10);
           num += 1;
           db[key].value = num.toString();
           connection.write(encodeRespInteger(num));
         } else {
-          // Key exists but value is NOT an integer
           connection.write("-ERR value is not an integer or out of range\r\n");
         }
       } else if (command === "xadd") {
@@ -475,8 +456,7 @@ server = net.createServer((connection) => {
             db[streamKey].type === "stream" &&
             db[streamKey].entries.length > 0
           ) {
-            const last =
-              db[streamKey].entries[db[streamKey].entries.length - 1];
+            const last = db[streamKey].entries[db[streamKey].entries.length - 1];
             const [lastMs, lastSeq] = last.id.split("-").map(Number);
             if (lastMs === ms) {
               seq = lastSeq + 1;
@@ -526,7 +506,6 @@ server = net.createServer((connection) => {
           );
           return;
         }
-
         // Prepare field-value pairs
         const pairs = {};
         for (let i = 3; i + 1 < cmdArr.length; i += 2) {
@@ -558,11 +537,7 @@ server = net.createServer((connection) => {
             const k = req.streams[i];
             let id = req.ids[i];
             if (id === "$") {
-              if (
-                db[k] &&
-                db[k].type === "stream" &&
-                db[k].entries.length > 0
-              ) {
+              if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
                 id = db[k].entries[db[k].entries.length - 1].id;
               } else {
                 id = "0-0";
@@ -591,6 +566,140 @@ server = net.createServer((connection) => {
           }
         }
         pendingXReads = remaining;
+      } else if (command === "xrange") {
+        // XRANGE: Return a range of stream entries.
+        const streamKey = cmdArr[1];
+        let start = cmdArr[2];
+        let end = cmdArr[3];
+        if (!db[streamKey] || db[streamKey].type !== "stream") {
+          connection.write("*0\r\n");
+          return;
+        }
+        function parseId(idStr, isEnd) {
+          if (idStr === "-") {
+            return [Number.MIN_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
+          }
+          if (idStr === "+") {
+            return [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
+          }
+          if (idStr.includes("-")) {
+            const [ms, seq] = idStr.split("-");
+            return [parseInt(ms, 10), parseInt(seq, 10)];
+          } else {
+            if (isEnd) {
+              return [parseInt(idStr, 10), Number.MAX_SAFE_INTEGER];
+            } else {
+              return [parseInt(idStr, 10), 0];
+            }
+          }
+        }
+        const [startMs, startSeq] = parseId(start, false);
+        const [endMs, endSeq] = parseId(end, true);
+        const result = [];
+        for (const entry of db[streamKey].entries) {
+          const [eMs, eSeq] = entry.id.split("-").map(Number);
+          const afterStart =
+            eMs > startMs || (eMs === startMs && eSeq >= startSeq);
+          const beforeEnd = eMs < endMs || (eMs === endMs && eSeq <= endSeq);
+          if (afterStart && beforeEnd) {
+            const pairs = [];
+            for (const [k, v] of Object.entries(entry)) {
+              if (k === "id") continue;
+              pairs.push(k, v);
+            }
+            result.push([entry.id, pairs]);
+          }
+        }
+        connection.write(encodeRespArrayDeep(result));
+      } else if (command === "xread") {
+        // === XREAD with BLOCK support ===
+        let blockMs = null;
+        let blockIdx = cmdArr.findIndex((x) => x.toLowerCase() === "block");
+        let streamsIdx = cmdArr.findIndex((x) => x.toLowerCase() === "streams");
+        if (blockIdx !== -1) {
+          blockMs = parseInt(cmdArr[blockIdx + 1], 10);
+        }
+        if (streamsIdx === -1) {
+          connection.write("*0\r\n");
+          return;
+        }
+        const streams = [];
+        const ids = [];
+        let s = streamsIdx + 1;
+        while (
+          s < cmdArr.length &&
+          !cmdArr[s].includes("-") &&
+          cmdArr[s] !== "$"
+        ) {
+          streams.push(cmdArr[s]);
+          s++;
+        }
+        while (s < cmdArr.length) {
+          ids.push(cmdArr[s]);
+          s++;
+        }
+        const resolvedIds = [];
+        for (let i = 0; i < streams.length; ++i) {
+          const key = streams[i];
+          const reqId = ids[i];
+          if (reqId === "$") {
+            if (
+              db[key] &&
+              db[key].type === "stream" &&
+              db[key].entries.length > 0
+            ) {
+              const lastEntry = db[key].entries[db[key].entries.length - 1];
+              resolvedIds.push(lastEntry.id);
+            } else {
+              resolvedIds.push("0-0");
+            }
+          } else {
+            resolvedIds.push(reqId);
+          }
+        }
+        let found = [];
+        for (let i = 0; i < streams.length; ++i) {
+          const k = streams[i];
+          const id = resolvedIds[i];
+          const arr = [];
+          if (db[k] && db[k].type === "stream") {
+            let [lastMs, lastSeq] = id.split("-").map(Number);
+            for (const entry of db[k].entries) {
+              let [eMs, eSeq] = entry.id.split("-").map(Number);
+              if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+                let fields = [];
+                for (let [kk, vv] of Object.entries(entry))
+                  if (kk !== "id") fields.push(kk, vv);
+                arr.push([entry.id, fields]);
+              }
+            }
+          }
+          if (arr.length) found.push([k, arr]);
+        }
+        if (found.length) {
+          connection.write(encodeRespArrayDeep(found));
+          return;
+        }
+        if (blockMs === null) {
+          connection.write("*0\r\n");
+          return;
+        }
+        let timeout = null;
+        if (blockMs > 0) {
+          // === THE FIX IS RIGHT HERE ===
+          timeout = setTimeout(() => {
+            connection.write("*-1\r\n"); // Proper RESP NULL ARRAY for timeout
+            pendingXReads = pendingXReads.filter(
+              (obj) => obj.conn !== connection
+            );
+          }, blockMs);
+        }
+        pendingXReads.push({
+          conn: connection,
+          streams,
+          ids: resolvedIds,
+          timer: timeout,
+        });
       } else if (command === "type") {
         // TYPE command: tells if value is string/stream/none
         const key = cmdArr[1];
@@ -648,7 +757,6 @@ server = net.createServer((connection) => {
         const infoStr = lines.join("\r\n");
         connection.write(`$${infoStr.length}\r\n${infoStr}\r\n`);
       }
-
       // REPLCONF GETACK * (ask replicas to send their offsets for WAIT)
       if (
         command === "replconf" &&
@@ -658,8 +766,7 @@ server = net.createServer((connection) => {
         const offsetStr = masterOffset.toString();
         const resp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${offsetStr.length}\r\n${offsetStr}\r\n`;
         connection.write(resp);
-        offset += bytesRead;
-        continue;
+        return;
       }
       // WAIT command (replication): blocks until N replicas ACK offset or timeout
       if (command === "wait") {
@@ -667,10 +774,8 @@ server = net.createServer((connection) => {
         const timeout = parseInt(cmdArr[2], 10) || 0;
         handleWAITCommand(connection, numReplicas, timeout);
       }
-
       offset += bytesRead;
     }
-    // Remove processed bytes from buffer
     connection.leftover = connection.leftover.slice(offset);
   });
 
@@ -685,7 +790,7 @@ server = net.createServer((connection) => {
     }
     pendingXReads = pendingXReads.filter((p) => p.conn !== connection);
   });
-}); // <--- THIS WAS THE MISSING CURLY BRACE
+});
 
 server.listen(port, "127.0.0.1");
 
@@ -701,7 +806,7 @@ function parseRESP(buffer) {
   return arr;
 }
 
-// WAIT: Register/resolve WAIT requests when enough replicas have acked.
+// WAIT: Register/resolve WAIT requests when enough replicas have acked
 function handleWAITCommand(clientConn, numReplicas, timeout) {
   const waitOffset = masterOffset;
   let resolved = false;
@@ -744,7 +849,6 @@ function resolveWAITs() {
 }
 
 // Minimal RESP array parser: returns [array, bytesRead]
-// (used in both master and replica code)
 function tryParseRESP(buf) {
   if (!buf.length || buf[0] !== 42) return [null, 0]; // 42 is '*'
   let str = buf.toString();
