@@ -183,22 +183,22 @@ if (role === "slave" && masterHost && masterPort) {
 
   // Minimal RESP array parser: returns [array, bytesRead]
   function tryParseRESP(buf) {
-    if (buf[0] !== 42) return [null, 0];
-    const str = buf.toString();
-    const firstLineEnd = str.indexOf("\r\n");
+    if (!buf.length || buf[0] !== 42) return [null, 0]; // 42 is '*'
+    let str = buf.toString();
+    let firstLineEnd = str.indexOf("\r\n");
     if (firstLineEnd === -1) return [null, 0];
-    const numElems = parseInt(str.slice(1, firstLineEnd), 10);
+    let numElems = parseInt(str.slice(1, firstLineEnd), 10);
     let elems = [];
     let cursor = firstLineEnd + 2;
     for (let i = 0; i < numElems; i++) {
-      if (buf[cursor] !== 36) return [null, 0];
-      const lenLineEnd = buf.indexOf("\r\n", cursor);
+      if (buf[cursor] !== 36) return [null, 0]; // 36 is '$'
+      let lenLineEnd = buf.indexOf("\r\n", cursor);
       if (lenLineEnd === -1) return [null, 0];
-      const len = parseInt(buf.slice(cursor + 1, lenLineEnd).toString(), 10);
-      const valStart = lenLineEnd + 2;
-      const valEnd = valStart + len;
+      let len = parseInt(buf.slice(cursor + 1, lenLineEnd).toString(), 10);
+      let valStart = lenLineEnd + 2;
+      let valEnd = valStart + len;
       if (valEnd + 2 > buf.length) return [null, 0];
-      const val = buf.slice(valStart, valEnd).toString();
+      let val = buf.slice(valStart, valEnd).toString();
       elems.push(val);
       cursor = valEnd + 2;
     }
