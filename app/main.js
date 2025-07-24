@@ -403,7 +403,7 @@ server = net.createServer((connection) => {
         expiresAt = Date.now() + px;
       }
 
-      db[key] = { value, expiresAt };
+      db[key] = { value, expiresAt, type: "string" }; // <-- ADD type: "string"
       connection.write("+OK\r\n");
 
       // ==== CHANGES FOR REPLICATION START ====
@@ -436,11 +436,30 @@ server = net.createServer((connection) => {
         // Null bulk string if key doesn't exist
         connection.write("$-1\r\n");
       }
+    } else if (command === "xadd") {
+      // ==== STREAM SUPPORT START ====
+      const streamKey = cmdArr[1];
+      const id = cmdArr[2];
+      // All remaining args are pairs: field1, value1, field2, value2...
+      const pairs = {};
+      for (let i = 3; i + 1 < cmdArr.length; i += 2) {
+        pairs[cmdArr[i]] = cmdArr[i + 1];
+      }
+      if (!db[streamKey]) {
+        db[streamKey] = { type: "stream", entries: [] };
+      }
+      db[streamKey].entries.push({ id, ...pairs });
+      connection.write(`$${id.length}\r\n${id}\r\n`);
+      // ==== STREAM SUPPORT END ====
     } else if (command === "type") {
-      // === TYPE COMMAND SUPPORT ===
+      // === TYPE COMMAND SUPPORT (string/none/stream) ===
       const key = cmdArr[1];
       if (db[key]) {
-        connection.write("+string\r\n");
+        if (db[key].type === "stream") {
+          connection.write("+stream\r\n");
+        } else {
+          connection.write("+string\r\n");
+        }
       } else {
         connection.write("+none\r\n");
       }
