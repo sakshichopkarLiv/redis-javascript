@@ -4,11 +4,9 @@ const path = require("path");
 const db = {};
 const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 const EMPTY_RDB = Buffer.from([
-  0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31,
-  0xff,
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+  0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xff, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
-
 
 let masterOffset = 0; // Total number of bytes of write commands propagated
 let replicaSockets = []; // Store each replica connection with metadata
@@ -540,6 +538,13 @@ function parseRESP(buffer) {
 function handleWAITCommand(clientConn, numReplicas, timeout) {
   const waitOffset = masterOffset;
   let resolved = false;
+
+  // Send REPLCONF GETACK * to all replicas
+  replicaSockets.forEach((sock) => {
+    if (sock.writable) {
+      sock.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");
+    }
+  });
 
   function countAcks() {
     return replicaSockets.filter((r) => r.lastAckOffset >= waitOffset).length;
