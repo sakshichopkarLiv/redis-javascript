@@ -191,7 +191,7 @@ if (dir && dbfilename) {
 console.log("Logs from your program will appear here!");
 
 // ==== CHANGES FOR REPLICATION START ====
-let replicaSocket = null;  // Store replication connection
+let replicaSockets = []; // Store multiple replication connections
 // ==== CHANGES FOR REPLICATION END ====
 
 // Helper: is a command a write command?
@@ -229,9 +229,9 @@ server = net.createServer((connection) => {
     // ==== CHANGES FOR REPLICATION START ====
     // Detect if this is the replication connection
     if (command === "psync") {
-      // When PSYNC happens, this is the replica socket
-      replicaSocket = connection;
+      // When PSYNC happens, this is a replica socket
       connection.isReplica = true; // Mark as replica
+      replicaSockets.push(connection); // Add to replicaSockets array
       // Send +FULLRESYNC <replid> 0\r\n
       connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
       // Prepare the correct empty RDB file buffer (version 11)
@@ -284,10 +284,15 @@ server = net.createServer((connection) => {
       connection.write("+OK\r\n");
 
       // ==== CHANGES FOR REPLICATION START ====
-      // Propagate to replica if this is NOT the replica connection
-      if (!connection.isReplica && replicaSocket) {
+      // Propagate to all replicas if this is NOT the replica connection
+      if (!connection.isReplica && replicaSockets.length > 0) {
         const respCmd = encodeRespArray(cmdArr); // Already has correct casing/args
-        replicaSocket.write(respCmd);
+        // Send to all still-writable replicas
+        replicaSockets.forEach((sock) => {
+          if (sock.writable) {
+            sock.write(respCmd);
+          }
+        });
       }
       // ==== CHANGES FOR REPLICATION END ====
     } else if (command === "get") {
@@ -362,6 +367,11 @@ server = net.createServer((connection) => {
   });
   connection.on("error", (err) => {
     console.log("Socket error:", err.message);
+  });
+  connection.on("close", () => {
+    if (connection.isReplica) {
+      replicaSockets = replicaSockets.filter((sock) => sock !== connection);
+    }
   });
 });
 
