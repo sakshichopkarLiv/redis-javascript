@@ -412,8 +412,8 @@ server = net.createServer((connection) => {
         connection.write("-ERR EXEC without MULTI\r\n");
         return;
       }
-      // For now, nothing to execute or return
-      connection.inTransaction = false; // <-- Reset after EXEC
+      connection.inTransaction = false; // End transaction mode
+      connection.write("*0\r\n"); // RESP empty array (no commands queued)
       return;
     } else if (command === "get") {
       const key = cmdArr[1];
