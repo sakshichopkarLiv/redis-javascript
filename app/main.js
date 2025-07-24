@@ -190,8 +190,31 @@ if (dir && dbfilename) {
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
 
+// ==== CHANGES FOR REPLICATION START ====
+let replicaSocket = null;  // Store replication connection
+// ==== CHANGES FOR REPLICATION END ====
+
+// Helper: is a command a write command?
+function isWriteCommand(cmd) {
+  // Add more if needed (DEL, etc.)
+  return ["set", "del"].includes(cmd);
+}
+
+// Helper: encode RESP array from array of strings
+function encodeRespArray(arr) {
+  let resp = `*${arr.length}\r\n`;
+  for (const val of arr) {
+    resp += `$${val.length}\r\n${val}\r\n`;
+  }
+  return resp;
+}
+
 // Uncomment this block to pass the first stage
-const server = net.createServer((connection) => {
+server = net.createServer((connection) => {
+  // ==== CHANGES FOR REPLICATION START ====
+  connection.isReplica = false; // Mark whether this socket is a replica
+  // ==== CHANGES FOR REPLICATION END ====
+
   // Handle connection
   connection.on("data", (data) => {
     // LOG what the master receives
@@ -202,6 +225,42 @@ const server = net.createServer((connection) => {
     if (!cmdArr || !cmdArr[0]) return;
 
     const command = cmdArr[0].toLowerCase();
+
+    // ==== CHANGES FOR REPLICATION START ====
+    // Detect if this is the replication connection
+    if (command === "psync") {
+      // When PSYNC happens, this is the replica socket
+      replicaSocket = connection;
+      connection.isReplica = true; // Mark as replica
+      // Send +FULLRESYNC <replid> 0\r\n
+      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
+      // Prepare the correct empty RDB file buffer (version 11)
+      const emptyRDB = Buffer.from([
+        0x52,
+        0x45,
+        0x44,
+        0x49,
+        0x53, // REDIS
+        0x30,
+        0x30,
+        0x31,
+        0x31, // 0011
+        0xff, // End of RDB file
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00, // CRC64 (8 bytes)
+      ]);
+      connection.write(`$${emptyRDB.length}\r\n`);
+      connection.write(emptyRDB);
+      // Do NOT send \r\n after the binary file!
+      return;
+    }
+    // ==== CHANGES FOR REPLICATION END ====
 
     if (command === "ping") {
       connection.write("+PONG\r\n");
@@ -223,6 +282,14 @@ const server = net.createServer((connection) => {
 
       db[key] = { value, expiresAt };
       connection.write("+OK\r\n");
+
+      // ==== CHANGES FOR REPLICATION START ====
+      // Propagate to replica if this is NOT the replica connection
+      if (!connection.isReplica && replicaSocket) {
+        const respCmd = encodeRespArray(cmdArr); // Already has correct casing/args
+        replicaSocket.write(respCmd);
+      }
+      // ==== CHANGES FOR REPLICATION END ====
     } else if (command === "get") {
       const key = cmdArr[1];
       const record = db[key];
@@ -290,35 +357,8 @@ const server = net.createServer((connection) => {
     } else if (command === "replconf") {
       connection.write("+OK\r\n");
       // Handler for SYNC or PSYNC
-    } else if (command === "psync") {
-      // Send +FULLRESYNC <replid> 0\r\n
-      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
-
-      // Prepare the correct empty RDB file buffer (version 11)
-      const emptyRDB = Buffer.from([
-        0x52,
-        0x45,
-        0x44,
-        0x49,
-        0x53, // REDIS
-        0x30,
-        0x30,
-        0x31,
-        0x31, // 0011
-        0xff, // End of RDB file
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00,
-        0x00, // CRC64 (8 bytes)
-      ]);
-      connection.write(`$${emptyRDB.length}\r\n`);
-      connection.write(emptyRDB);
-      // Do NOT send \r\n after the binary file!
     }
+    // If you add DEL or other write commands, add their propagation as above
   });
   connection.on("error", (err) => {
     console.log("Socket error:", err.message);
