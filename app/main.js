@@ -489,8 +489,11 @@ server = net.createServer((connection) => {
       // If you add DEL or other write commands, add their propagation as above
     }
     if (command === "wait") {
-      // Always reply with :0\r\n (RESP integer 0)
-      connection.write(":0\r\n");
+      // Only count currently connected/writable replicas (not this client)
+      const replicaCount = replicaSockets.filter(
+        (sock) => sock.writable
+      ).length;
+      connection.write(`:${replicaCount}\r\n`);
     }
   });
   connection.on("error", (err) => {
