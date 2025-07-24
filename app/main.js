@@ -507,10 +507,11 @@ server = net.createServer((connection) => {
       // You may also want to support <ms>-* for bonus
       else if (/^\d+-\*$/.test(id)) {
         ms = Number(id.split("-")[0]);
-        seq = 0;
-        const entries = db[streamKey].entries;
-        if (entries.length > 0) {
-          let maxSeq = -1;
+        seq = 1;
+        if (db[streamKey] && db[streamKey].entries.length > 0) {
+          // Find last seq for this ms
+          const entries = db[streamKey].entries;
+          let maxSeq = 0;
           for (let i = entries.length - 1; i >= 0; i--) {
             const [entryMs, entrySeq] = entries[i].id.split("-").map(Number);
             if (entryMs === ms) {
@@ -518,8 +519,7 @@ server = net.createServer((connection) => {
             }
             if (entryMs < ms) break;
           }
-          if (maxSeq >= 0) seq = maxSeq + 1;
-          else seq = 0;
+          seq = maxSeq + 1;
         }
         id = `${ms}-${seq}`;
       }
