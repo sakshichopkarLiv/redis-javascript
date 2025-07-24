@@ -575,6 +575,10 @@ server = net.createServer((connection) => {
           // Minimal possible value for start of stream
           return [Number.MIN_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
         }
+        if (idStr === "+") {
+          // Max possible value for end of stream
+          return [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
+        }
         if (idStr.includes("-")) {
           const [ms, seq] = idStr.split("-");
           return [parseInt(ms, 10), parseInt(seq, 10)];
