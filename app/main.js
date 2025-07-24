@@ -17,10 +17,10 @@ const EMPTY_RDB = Buffer.from([
 ]);
 
 // === REPLICATION / WAIT SUPPORT ===
-let masterOffset = 0;        // Tracks how many bytes we've sent to replicas.
-let replicaSockets = [];     // All active replica connections.
-let pendingWAITs = [];       // All WAIT requests still waiting for ACKs.
-let pendingXReads = [];      // All XREAD BLOCK requests still pending.
+let masterOffset = 0; // Tracks how many bytes we've sent to replicas.
+let replicaSockets = []; // All active replica connections.
+let pendingWAITs = []; // All WAIT requests still waiting for ACKs.
+let pendingXReads = []; // All XREAD BLOCK requests still pending.
 
 // === CLI ARGUMENTS ===
 let dir = "";
@@ -59,8 +59,8 @@ if (role === "slave" && masterHost && masterPort) {
   });
 
   let handshakeStep = 0;
-  let awaitingRDB = false;     // Are we currently reading RDB data?
-  let rdbBytesExpected = 0;    // Bytes to expect for RDB
+  let awaitingRDB = false; // Are we currently reading RDB data?
+  let rdbBytesExpected = 0; // Bytes to expect for RDB
   let leftover = Buffer.alloc(0); // Buffer for command parsing
 
   masterConnection.on("data", (data) => {
@@ -149,7 +149,9 @@ if (role === "slave" && masterHost && masterPort) {
         arr[1] &&
         arr[1].toLowerCase() === "getack"
       ) {
-        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${masterOffset.toString().length}\r\n${masterOffset}\r\n`;
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
+          masterOffset.toString().length
+        }\r\n${masterOffset}\r\n`;
         masterConnection.write(ackResp);
         masterOffset += bytesRead;
       } else {
@@ -411,18 +413,20 @@ server = net.createServer((connection) => {
         connection.write("$-1\r\n");
       }
     } else if (command === "incr") {
-      // INCR command: Increments integer string
       const key = cmdArr[1];
-      if (
-        db[key] &&
-        db[key].type === "string" &&
-        /^-?\d+$/.test(db[key].value)
-      ) {
+      // If the key does not exist, set it to "1" (string!) and reply :1\r\n
+      if (!db[key]) {
+        db[key] = { value: "1", type: "string" };
+        connection.write(encodeRespInteger(1));
+      }
+      // If key exists and is a string that looks like an integer
+      else if (db[key].type === "string" && /^-?\d+$/.test(db[key].value)) {
         let num = parseInt(db[key].value, 10);
         num += 1;
         db[key].value = num.toString();
         connection.write(encodeRespInteger(num));
       }
+      // (else: do nothing for non-integer/non-string keys at this stage)
     } else if (command === "xadd") {
       // XADD command: Add to stream, handle IDs (full/partial/auto), error checks
       const streamKey = cmdArr[1];
@@ -469,15 +473,21 @@ server = net.createServer((connection) => {
       }
       // Validate id
       if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
-        connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
         return;
       }
       if (ms === 0 && seq === 0) {
-        connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
         return;
       }
       if (ms === 0 && seq < 1) {
-        connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
         return;
       }
       // Prepare field-value pairs
@@ -494,7 +504,9 @@ server = net.createServer((connection) => {
         const last = entries[entries.length - 1];
         const [lastMs, lastSeq] = last.id.split("-").map(Number);
         if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
-          connection.write("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+          connection.write(
+            "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+          );
           return;
         }
       }
@@ -570,7 +582,8 @@ server = net.createServer((connection) => {
       const result = [];
       for (const entry of db[streamKey].entries) {
         const [eMs, eSeq] = entry.id.split("-").map(Number);
-        const afterStart = eMs > startMs || (eMs === startMs && eSeq >= startSeq);
+        const afterStart =
+          eMs > startMs || (eMs === startMs && eSeq >= startSeq);
         const beforeEnd = eMs < endMs || (eMs === endMs && eSeq <= endSeq);
         if (afterStart && beforeEnd) {
           const pairs = [];
