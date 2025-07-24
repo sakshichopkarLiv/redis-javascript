@@ -7,6 +7,10 @@ const EMPTY_RDB_HEX =
   "5245444953303039310a000000ff00000000000000000000b409a26a4aa8657b";
 const EMPTY_RDB = Buffer.from(EMPTY_RDB_HEX, "hex");
 
+let masterOffset = 0; // Total number of bytes of write commands propagated
+let replicaSockets = []; // Store each replica connection with metadata
+let pendingWAITs = []; // Pending WAIT commands (from clients)
+
 // Get CLI args
 let dir = "";
 let dbfilename = "";
@@ -119,9 +123,6 @@ if (role === "slave" && masterHost && masterPort) {
     console.log("Error connecting to master:", err.message);
   });
 
-  // At the top of the replica section:
-  let masterOffset = 0; // Track the total bytes processed
-
   function processLeftover() {
     let offset = 0;
     while (offset < leftover.length) {
@@ -137,9 +138,7 @@ if (role === "slave" && masterHost && masterPort) {
         arr[1].toLowerCase() === "getack"
       ) {
         // RESP Array: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
-        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
-          masterOffset.toString().length
-        }\r\n${masterOffset}\r\n`;
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${masterOffset.toString().length}\r\n${masterOffset}\r\n`;
         masterConnection.write(ackResp);
         masterOffset += bytesRead; // Only update offset after sending
       } else {
@@ -314,10 +313,6 @@ if (dir && dbfilename) {
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
 
-// ==== CHANGES FOR REPLICATION START ====
-let replicaSockets = []; // Store multiple replication connections
-// ==== CHANGES FOR REPLICATION END ====
-
 // Helper: is a command a write command?
 function isWriteCommand(cmd) {
   // Add more if needed (DEL, etc.)
@@ -333,10 +328,16 @@ function encodeRespArray(arr) {
   return resp;
 }
 
+function encodeRespInteger(n) {
+  return `:${n}\r\n`;
+}
+
+// ==== MAIN SERVER STARTS HERE ====
 // Uncomment this block to pass the first stage
 server = net.createServer((connection) => {
   // ==== CHANGES FOR REPLICATION START ====
   connection.isReplica = false; // Mark whether this socket is a replica
+  connection.lastAckOffset = 0; // Used for replicas, tracks last ACK offset
   // ==== CHANGES FOR REPLICATION END ====
 
   // Handle connection
@@ -355,6 +356,7 @@ server = net.createServer((connection) => {
     if (command === "psync") {
       // When PSYNC happens, this is a replica socket
       connection.isReplica = true; // Mark as replica
+      connection.lastAckOffset = 0;
       replicaSockets.push(connection); // Add to replicaSockets array
       // Send +FULLRESYNC <replid> 0\r\n
       connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
@@ -384,6 +386,20 @@ server = net.createServer((connection) => {
       // Do NOT send \r\n after the binary file!
       return;
     }
+
+    // ===== HANDLE REPLCONF ACK FROM REPLICA =====
+    if (
+      connection.isReplica &&
+      command === "replconf" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "ack" &&
+      cmdArr[2]
+    ) {
+      const ackOffset = parseInt(cmdArr[2], 10) || 0;
+      connection.lastAckOffset = ackOffset;
+      resolveWAITs();
+      return;
+    }
     // ==== CHANGES FOR REPLICATION END ====
 
     if (command === "ping") {
@@ -411,6 +427,7 @@ server = net.createServer((connection) => {
       // Propagate to all replicas if this is NOT the replica connection
       if (!connection.isReplica && replicaSockets.length > 0) {
         const respCmd = encodeRespArray(cmdArr); // Already has correct casing/args
+        masterOffset += Buffer.byteLength(respCmd, "utf8"); // Track the master replication offset
         // Send to all still-writable replicas
         replicaSockets.forEach((sock) => {
           if (sock.writable) {
@@ -487,13 +504,11 @@ server = net.createServer((connection) => {
       connection.write("+OK\r\n");
       // Handler for SYNC or PSYNC
       // If you add DEL or other write commands, add their propagation as above
-    }
-    if (command === "wait") {
-      // Only count currently connected/writable replicas (not this client)
-      const replicaCount = replicaSockets.filter(
-        (sock) => sock.writable
-      ).length;
-      connection.write(`:${replicaCount}\r\n`);
+    } else if (command === "wait") {
+      // New: WAIT logic that supports offsets/acks!
+      const numReplicas = parseInt(cmdArr[1], 10) || 0;
+      const timeout = parseInt(cmdArr[2], 10) || 0;
+      handleWAITCommand(connection, numReplicas, timeout);
     }
   });
   connection.on("error", (err) => {
@@ -502,6 +517,7 @@ server = net.createServer((connection) => {
   connection.on("close", () => {
     if (connection.isReplica) {
       replicaSockets = replicaSockets.filter((sock) => sock !== connection);
+      resolveWAITs();
     }
   });
 });
@@ -524,4 +540,51 @@ function parseRESP(buffer) {
   }
 
   return arr;
+}
+
+// ====== WAIT logic below ======
+function handleWAITCommand(clientConn, numReplicas, timeout) {
+  const waitOffset = masterOffset;
+  let resolved = false;
+
+  function countAcks() {
+    return replicaSockets.filter(
+      r => r.lastAckOffset >= waitOffset
+    ).length;
+  }
+
+  function maybeResolve() {
+    if (resolved) return;
+    let acked = countAcks();
+    if (acked >= numReplicas) {
+      resolved = true;
+      clientConn.write(encodeRespInteger(acked));
+      clearTimeout(timer);
+      pendingWAITs = pendingWAITs.filter(w => w !== waitObj);
+    }
+  }
+
+  // Immediate resolve if enough already
+  if (countAcks() >= numReplicas) {
+    clientConn.write(encodeRespInteger(countAcks()));
+    return;
+  }
+
+  // Else, push pending WAIT
+  let timer = setTimeout(() => {
+    if (!resolved) {
+      let acked = countAcks();
+      clientConn.write(encodeRespInteger(acked));
+      resolved = true;
+      pendingWAITs = pendingWAITs.filter(w => w !== waitObj);
+    }
+  }, timeout);
+
+  const waitObj = { waitOffset, numReplicas, clientConn, timer, maybeResolve };
+  pendingWAITs.push(waitObj);
+}
+
+// Call this function after *any* replica ACK is received
+function resolveWAITs() {
+  pendingWAITs.forEach(w => w.maybeResolve());
 }
