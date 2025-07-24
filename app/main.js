@@ -668,7 +668,7 @@ server = net.createServer((connection) => {
       connection.write(encodeRespArrayDeep(result));
       // ==== XRANGE SUPPORT END ====
     } else if (command === "xread") {
-      // ==== XREAD WITH BLOCK SUPPORT ====
+      // ==== XREAD WITH BLOCK SUPPORT, including $ as ID ====
       let blockMs = null;
       let blockIdx = cmdArr.findIndex((x) => x.toLowerCase() === "block");
       let streamsIdx = cmdArr.findIndex((x) => x.toLowerCase() === "streams");
@@ -695,19 +695,32 @@ server = net.createServer((connection) => {
         ids.push(cmdArr[s]);
         s++;
       }
+      // Fix for $: resolve $ to last id of each stream at time of blocking
+      const resolvedIds = [];
+      for (let i = 0; i < streams.length; ++i) {
+        const key = streams[i];
+        const reqId = ids[i];
+        if (reqId === "$") {
+          if (
+            db[key] &&
+            db[key].type === "stream" &&
+            db[key].entries.length > 0
+          ) {
+            // Last entry's id at the moment of blocking
+            const lastEntry = db[key].entries[db[key].entries.length - 1];
+            resolvedIds.push(lastEntry.id);
+          } else {
+            resolvedIds.push("0-0");
+          }
+        } else {
+          resolvedIds.push(reqId);
+        }
+      }
       // Find new entries for each stream
       let found = [];
       for (let i = 0; i < streams.length; ++i) {
         const k = streams[i];
-        let id = ids[i];
-        // ---- Handle $ for "new messages only" ----
-        if (id === "$") {
-          if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
-            id = db[k].entries[db[k].entries.length - 1].id;
-          } else {
-            id = "0-0";
-          }
-        }
+        const id = resolvedIds[i];
         const arr = [];
         if (db[k] && db[k].type === "stream") {
           let [lastMs, lastSeq] = id.split("-").map(Number);
@@ -742,11 +755,11 @@ server = net.createServer((connection) => {
           );
         }, blockMs);
       }
-      // Otherwise, just keep it in pendingXReads until a matching XADD wakes it up
+      // Save resolvedIds (NOT the original ids!) for this blocked read
       pendingXReads.push({
         conn: connection,
         streams,
-        ids,
+        ids: resolvedIds,
         timer: timeout,
       });
       // ==== XREAD BLOCK SUPPORT END ====
