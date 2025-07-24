@@ -470,60 +470,101 @@ server = net.createServer((connection) => {
         connection.write("$-1\r\n");
       }
     } else if (command === "xadd") {
+      // ==== STREAM SUPPORT START + VALIDATION ====
       const streamKey = cmdArr[1];
       let id = cmdArr[2];
 
-      // Build field/value pairs
-      const pairs = {};
-      for (let i = 3; i + 1 < cmdArr.length; i += 2) {
-        pairs[cmdArr[i]] = cmdArr[i + 1];
-      }
-
-      // Ensure stream object exists
-      if (!db[streamKey]) {
-        db[streamKey] = { type: "stream", entries: [] };
-      } else if (!db[streamKey].entries) {
-        db[streamKey].entries = [];
-        db[streamKey].type = "stream";
-      }
-
-      // ----- FIX: Handle ID -----
+      // Parse XADD id (handle '*', '<ms>-*', or explicit)
       let ms, seq;
+
+      // Fully auto
       if (id === "*") {
         ms = Date.now();
         seq = 0;
-        // If previous entry has same ms, increment sequence
-        const entries = db[streamKey].entries;
-        if (entries.length > 0) {
-          const [lastMs, lastSeq] = entries[entries.length - 1].id
-            .split("-")
-            .map(Number);
+        if (
+          db[streamKey] &&
+          db[streamKey].type === "stream" &&
+          db[streamKey].entries.length > 0
+        ) {
+          const last = db[streamKey].entries[db[streamKey].entries.length - 1];
+          const [lastMs, lastSeq] = last.id.split("-").map(Number);
           if (lastMs === ms) {
             seq = lastSeq + 1;
           }
         }
         id = `${ms}-${seq}`;
       }
-      // You may also want to support <ms>-* for bonus
+      // Partially auto
       else if (/^\d+-\*$/.test(id)) {
         ms = Number(id.split("-")[0]);
-        seq = ms === 0 ? 1 : 0;
-        if (db[streamKey] && db[streamKey].entries.length > 0) {
-          const entries = db[streamKey].entries;
+        if (!db[streamKey] || db[streamKey].entries.length === 0) {
+          seq = ms === 0 ? 1 : 0;
+        } else {
           let maxSeq = -1;
-          for (let i = entries.length - 1; i >= 0; i--) {
-            const [entryMs, entrySeq] = entries[i].id.split("-").map(Number);
+          for (let i = db[streamKey].entries.length - 1; i >= 0; i--) {
+            const [entryMs, entrySeq] = db[streamKey].entries[i].id
+              .split("-")
+              .map(Number);
             if (entryMs === ms) {
               maxSeq = Math.max(maxSeq, entrySeq);
             }
-            if (entryMs < ms) break;
+            if (entryMs < ms) break; // stop searching
           }
-          if (maxSeq >= 0) seq = maxSeq + 1;
-          // else seq stays at ms === 0 ? 1 : 0;
+          seq = maxSeq >= 0 ? maxSeq + 1 : ms === 0 ? 1 : 0;
         }
         id = `${ms}-${seq}`;
+      } else {
+        // Explicit
+        const parts = id.split("-");
+        ms = Number(parts[0]);
+        seq = Number(parts[1]);
       }
 
+      // Validate id
+      if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
+        return;
+      }
+      if (ms === 0 && seq === 0) {
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
+        return;
+      }
+      if (ms === 0 && seq < 1) {
+        connection.write(
+          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        );
+        return;
+      }
+
+      // Prepare field-value pairs
+      const pairs = {};
+      for (let i = 3; i + 1 < cmdArr.length; i += 2) {
+        pairs[cmdArr[i]] = cmdArr[i + 1];
+      }
+
+      // Stream creation if needed
+      if (!db[streamKey]) {
+        db[streamKey] = { type: "stream", entries: [] };
+      }
+
+      // Strictly greater than last entry check!
+      const entries = db[streamKey].entries;
+      if (entries.length > 0) {
+        const last = entries[entries.length - 1];
+        const [lastMs, lastSeq] = last.id.split("-").map(Number);
+        if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
+          connection.write(
+            "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+          );
+          return;
+        }
+      }
+
+      // Add entry
       db[streamKey].entries.push({ id, ...pairs });
       connection.write(`$${id.length}\r\n${id}\r\n`);
 
@@ -533,10 +574,10 @@ server = net.createServer((connection) => {
         let found = [];
         for (let i = 0; i < req.streams.length; ++i) {
           const k = req.streams[i];
-          const id = req.ids[i];
+          const lastId = req.ids[i];
           const arr = [];
           if (db[k] && db[k].type === "stream") {
-            let [lastMs, lastSeq] = id.split("-").map(Number);
+            let [lastMs, lastSeq] = lastId.split("-").map(Number);
             for (const entry of db[k].entries) {
               let [eMs, eSeq] = entry.id.split("-").map(Number);
               if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
