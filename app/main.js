@@ -3,9 +3,12 @@ const fs = require("fs");
 const path = require("path");
 const db = {};
 const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
-const EMPTY_RDB_HEX =
-  "5245444953303039310a000000ff00000000000000000000b409a26a4aa8657b";
-const EMPTY_RDB = Buffer.from(EMPTY_RDB_HEX, "hex");
+const EMPTY_RDB = Buffer.from([
+  0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31,
+  0xff,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+]);
+
 
 let masterOffset = 0; // Total number of bytes of write commands propagated
 let replicaSockets = []; // Store each replica connection with metadata
