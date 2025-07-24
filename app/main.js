@@ -571,6 +571,10 @@ server = net.createServer((connection) => {
 
       // Parse start and end IDs (support shorthand like "0" for "0-0" and "0-9999999999999999999")
       function parseId(idStr, isEnd) {
+        if (idStr === "-") {
+          // Minimal possible value for start of stream
+          return [Number.MIN_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
+        }
         if (idStr.includes("-")) {
           const [ms, seq] = idStr.split("-");
           return [parseInt(ms, 10), parseInt(seq, 10)];
@@ -583,6 +587,7 @@ server = net.createServer((connection) => {
           }
         }
       }
+
       const [startMs, startSeq] = parseId(start, false);
       const [endMs, endSeq] = parseId(end, true);
 
