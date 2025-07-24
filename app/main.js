@@ -138,7 +138,9 @@ if (role === "slave" && masterHost && masterPort) {
         arr[1].toLowerCase() === "getack"
       ) {
         // RESP Array: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
-        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${masterOffset.toString().length}\r\n${masterOffset}\r\n`;
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
+          masterOffset.toString().length
+        }\r\n${masterOffset}\r\n`;
         masterConnection.write(ackResp);
         masterOffset += bytesRead; // Only update offset after sending
       } else {
@@ -505,7 +507,14 @@ server = net.createServer((connection) => {
       // Handler for SYNC or PSYNC
       // If you add DEL or other write commands, add their propagation as above
     } else if (command === "wait") {
-      // New: WAIT logic that supports offsets/acks!
+      // Before handling WAIT, request ACKs from all replicas!
+      replicaSockets.forEach((sock) => {
+        if (sock.writable) {
+          // REPLCONF GETACK *
+          sock.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");
+        }
+      });
+
       const numReplicas = parseInt(cmdArr[1], 10) || 0;
       const timeout = parseInt(cmdArr[2], 10) || 0;
       handleWAITCommand(connection, numReplicas, timeout);
@@ -548,9 +557,7 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
   let resolved = false;
 
   function countAcks() {
-    return replicaSockets.filter(
-      r => r.lastAckOffset >= waitOffset
-    ).length;
+    return replicaSockets.filter((r) => r.lastAckOffset >= waitOffset).length;
   }
 
   function maybeResolve() {
@@ -560,7 +567,7 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
       resolved = true;
       clientConn.write(encodeRespInteger(acked));
       clearTimeout(timer);
-      pendingWAITs = pendingWAITs.filter(w => w !== waitObj);
+      pendingWAITs = pendingWAITs.filter((w) => w !== waitObj);
     }
   }
 
@@ -576,7 +583,7 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
       let acked = countAcks();
       clientConn.write(encodeRespInteger(acked));
       resolved = true;
-      pendingWAITs = pendingWAITs.filter(w => w !== waitObj);
+      pendingWAITs = pendingWAITs.filter((w) => w !== waitObj);
     }
   }, timeout);
 
@@ -586,5 +593,5 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
 
 // Call this function after "any" replica ACK is received
 function resolveWAITs() {
-  pendingWAITs.forEach(w => w.maybeResolve());
+  pendingWAITs.forEach((w) => w.maybeResolve());
 }
