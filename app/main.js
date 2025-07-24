@@ -629,6 +629,71 @@ server = net.createServer((connection) => {
 
       connection.write(encodeRespArrayDeep(result));
       // ==== XRANGE SUPPORT END ====
+    } else if (command === "xread") {
+      // ==== XREAD SUPPORT START ====
+      // Only support the form: XREAD STREAMS key id
+      // Example: XREAD STREAMS stream_key 0-0
+
+      // Find 'streams' keyword position (must be 1)
+      const streamsIdx = cmdArr.findIndex((s) => s.toLowerCase() === "streams");
+      if (streamsIdx < 0 || streamsIdx + 2 >= cmdArr.length) {
+        // Minimal validation
+        connection.write("*0\r\n");
+        return;
+      }
+
+      // Only supporting single stream
+      const streamKey = cmdArr[streamsIdx + 1];
+      const lastId = cmdArr[streamsIdx + 2]; // e.g. "0-0"
+
+      if (!db[streamKey] || db[streamKey].type !== "stream") {
+        connection.write("*0\r\n");
+        return;
+      }
+
+      // Only include entries strictly greater than lastId
+      function parseId(idStr) {
+        const [ms, seq] = idStr.split("-").map(Number);
+        return [ms, seq];
+      }
+      const [lastMs, lastSeq] = parseId(lastId);
+
+      // Collect entries with id > lastId
+      const stream = db[streamKey].entries;
+      const result = [];
+      for (const entry of stream) {
+        const [eMs, eSeq] = entry.id.split("-").map(Number);
+        // Only entries > lastId (exclusive)
+        if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+          // Compose [id, [field1, value1, ...]]
+          const pairs = [];
+          for (const [k, v] of Object.entries(entry)) {
+            if (k === "id") continue;
+            pairs.push(k, v);
+          }
+          result.push([entry.id, pairs]);
+        }
+      }
+
+      // Return as RESP array: [[stream_key, [[id, [fields]]...]]]
+      if (result.length === 0) {
+        connection.write("*0\r\n");
+      } else {
+        function encodeRespArrayDeep(arr) {
+          let resp = `*${arr.length}\r\n`;
+          for (const item of arr) {
+            if (Array.isArray(item)) {
+              resp += encodeRespArrayDeep(item);
+            } else {
+              resp += `$${item.length}\r\n${item}\r\n`;
+            }
+          }
+          return resp;
+        }
+        // Wrap result as [[streamKey, result]]
+        connection.write(encodeRespArrayDeep([[streamKey, result]]));
+      }
+      // ==== XREAD SUPPORT END ====
     } else if (command === "type") {
       // === TYPE COMMAND SUPPORT (string/none/stream) ===
       const key = cmdArr[1];
