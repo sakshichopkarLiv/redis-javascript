@@ -133,6 +133,19 @@ if (role === "slave" && masterHost && masterPort) {
   function handleReplicaCommand(cmdArr) {
     if (!cmdArr || !cmdArr[0]) return;
     const command = cmdArr[0].toLowerCase();
+    // --- handle REPLCONF GETACK * ---
+    if (
+      command === "replconf" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "getack"
+    ) {
+      // Send REPLCONF ACK 0 as RESP array
+      masterConnection.write(
+        "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+      );
+      return;
+    }
+    // --- existing SET logic etc below ---
     if (command === "set") {
       const key = cmdArr[1];
       const value = cmdArr[2];
@@ -142,10 +155,7 @@ if (role === "slave" && masterHost && masterPort) {
         expiresAt = Date.now() + px;
       }
       db[key] = { value, expiresAt };
-      // Debug: log when replica applies a SET from master
-      // console.log("[replica] SET from master:", key, value);
     }
-    // Add DEL, etc, if needed
   }
 
   // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
