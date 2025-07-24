@@ -90,8 +90,8 @@ if (role === "slave" && masterHost && masterPort) {
               // Skip RDB, process what's after it
               const afterRDB = rdbAvailable.slice(rdbBytesExpected);
               leftover = Buffer.concat([leftover, afterRDB]);
-              processLeftover();
               awaitingRDB = false;
+              processLeftover();
             } else {
               // We'll need to wait for more data for full RDB
               rdbBytesExpected -= rdbAvailable.length;
@@ -105,8 +105,8 @@ if (role === "slave" && masterHost && masterPort) {
       if (data.length >= rdbBytesExpected) {
         const afterRDB = data.slice(rdbBytesExpected);
         leftover = Buffer.concat([leftover, afterRDB]);
-        processLeftover();
         awaitingRDB = false;
+        processLeftover();
       } else {
         rdbBytesExpected -= data.length;
         // Still waiting for rest of RDB
@@ -150,9 +150,8 @@ if (role === "slave" && masterHost && masterPort) {
         expiresAt = Date.now() + px;
       }
       db[key] = { value, expiresAt };
-      console.log("[replica] SET from master:", key, value);
+      console.log("[replica] Applied SET", key, value);
     }
-    // Add DEL, etc if needed!
   }
 
   // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
