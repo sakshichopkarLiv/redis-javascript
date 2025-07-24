@@ -160,27 +160,31 @@ if (role === "slave" && masterHost && masterPort) {
     const command = cmdArr[0].toLowerCase();
 
     if (command === "set") {
-      const key = cmdArr[1];
-      const value = cmdArr[2];
-      let expiresAt = null;
-      if (cmdArr.length >= 5 && cmdArr[3].toLowerCase() === "px") {
-        const px = parseInt(cmdArr[4], 10);
-        expiresAt = Date.now() + px;
-      }
-      db[key] = { value, expiresAt, type: "string" };
-      connection.write("+OK\r\n"); // <- ALWAYS send this for SET!
+  const key = cmdArr[1];
+  const value = cmdArr[2];
 
-      // Replication: send to all replicas if not a replica connection
-      if (!connection.isReplica && replicaSockets.length > 0) {
-        const respCmd = encodeRespArray(cmdArr);
-        masterOffset += Buffer.byteLength(respCmd, "utf8");
-        replicaSockets.forEach((sock) => {
-          if (sock.writable) sock.write(respCmd);
-        });
-      }
-      return; // (optional, prevents running into other logic)
-    }
+  let expiresAt = null;
+  if (cmdArr.length >= 5 && cmdArr[3] && cmdArr[3].toLowerCase() === "px") {
+    const px = parseInt(cmdArr[4], 10);
+    expiresAt = Date.now() + px;
   }
+
+  db[key] = { value, expiresAt, type: "string" };
+  // Always send reply!
+  connection.write("+OK\r\n");
+
+  // (replication logic unchanged)
+  if (!connection.isReplica && replicaSockets.length > 0) {
+    const respCmd = encodeRespArray(cmdArr);
+    masterOffset += Buffer.byteLength(respCmd, "utf8");
+    replicaSockets.forEach((sock) => {
+      if (sock.writable) {
+        sock.write(respCmd);
+      }
+    });
+  }
+}
+}
 
   // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
   function tryParseRESP(buf) {
