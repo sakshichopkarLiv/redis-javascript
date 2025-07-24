@@ -398,9 +398,22 @@ server = net.createServer((connection) => {
           }
         });
       }
-    } else if (command === "multi") {
-      // Respond to MULTI command with OK as per Redis protocol
+    } // --- MULTI/EXEC Transaction Handling ---
+    else if (command === "multi") {
+      // Begin a new transaction (queuing is not required yet)
+      connection.inTransaction = true;
       connection.write("+OK\r\n");
+      return;
+    }
+
+    if (command === "exec") {
+      if (!connection.inTransaction) {
+        connection.write("-ERR EXEC without MULTI\r\n");
+        return;
+      }
+      // For now, nothing to execute or return
+      connection.inTransaction = false; // <-- Reset after EXEC
+      return;
     } else if (command === "get") {
       const key = cmdArr[1];
       const record = db[key];
