@@ -630,53 +630,57 @@ server = net.createServer((connection) => {
       connection.write(encodeRespArrayDeep(result));
       // ==== XRANGE SUPPORT END ====
     } else if (command === "xread") {
-      // ==== XREAD SUPPORT START ====
-      // Only support the form: XREAD STREAMS key id
-      // Example: XREAD STREAMS stream_key 0-0
-
-      // Find 'streams' keyword position (must be 1)
+      // ==== XREAD SUPPORT START (MULTI-STREAM) ====
+      // Only support the form: XREAD STREAMS key1 key2 ... id1 id2 ...
       const streamsIdx = cmdArr.findIndex((s) => s.toLowerCase() === "streams");
-      if (streamsIdx < 0 || streamsIdx + 2 >= cmdArr.length) {
-        // Minimal validation
+      if (streamsIdx < 0 || streamsIdx + 1 >= cmdArr.length) {
         connection.write("*0\r\n");
         return;
       }
 
-      // Only supporting single stream
-      const streamKey = cmdArr[streamsIdx + 1];
-      const lastId = cmdArr[streamsIdx + 2]; // e.g. "0-0"
+      // Determine streams and IDs
+      // e.g., ... STREAMS s1 s2 ... id1 id2 ...
+      // streams: cmdArr[streamsIdx+1 .. streamsIdx+N]
+      // ids:     cmdArr[streamsIdx+1+N .. ]
+      const streamsAndIds = cmdArr.slice(streamsIdx + 1);
+      const half = Math.floor(streamsAndIds.length / 2);
+      const streamKeys = streamsAndIds.slice(0, half);
+      const lastIds = streamsAndIds.slice(half);
 
-      if (!db[streamKey] || db[streamKey].type !== "stream") {
+      // Safety: If streams count doesn't match IDs, reply with empty
+      if (streamKeys.length !== lastIds.length) {
         connection.write("*0\r\n");
         return;
       }
 
-      // Only include entries strictly greater than lastId
-      function parseId(idStr) {
-        const [ms, seq] = idStr.split("-").map(Number);
-        return [ms, seq];
-      }
-      const [lastMs, lastSeq] = parseId(lastId);
+      const multiResult = [];
+      for (let i = 0; i < streamKeys.length; ++i) {
+        const streamKey = streamKeys[i];
+        const lastId = lastIds[i];
+        if (!db[streamKey] || db[streamKey].type !== "stream") {
+          continue; // skip missing streams
+        }
+        const stream = db[streamKey].entries;
+        const [lastMs, lastSeq] = lastId.split("-").map(Number);
 
-      // Collect entries with id > lastId
-      const stream = db[streamKey].entries;
-      const result = [];
-      for (const entry of stream) {
-        const [eMs, eSeq] = entry.id.split("-").map(Number);
-        // Only entries > lastId (exclusive)
-        if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
-          // Compose [id, [field1, value1, ...]]
-          const pairs = [];
-          for (const [k, v] of Object.entries(entry)) {
-            if (k === "id") continue;
-            pairs.push(k, v);
+        const entries = [];
+        for (const entry of stream) {
+          const [eMs, eSeq] = entry.id.split("-").map(Number);
+          if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+            const pairs = [];
+            for (const [k, v] of Object.entries(entry)) {
+              if (k === "id") continue;
+              pairs.push(k, v);
+            }
+            entries.push([entry.id, pairs]);
           }
-          result.push([entry.id, pairs]);
+        }
+        if (entries.length > 0) {
+          multiResult.push([streamKey, entries]);
         }
       }
 
-      // Return as RESP array: [[stream_key, [[id, [fields]]...]]]
-      if (result.length === 0) {
+      if (multiResult.length === 0) {
         connection.write("*0\r\n");
       } else {
         function encodeRespArrayDeep(arr) {
@@ -690,8 +694,7 @@ server = net.createServer((connection) => {
           }
           return resp;
         }
-        // Wrap result as [[streamKey, result]]
-        connection.write(encodeRespArrayDeep([[streamKey, result]]));
+        connection.write(encodeRespArrayDeep(multiResult));
       }
       // ==== XREAD SUPPORT END ====
     } else if (command === "type") {
