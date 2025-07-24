@@ -182,7 +182,6 @@ if (role === "slave" && masterHost && masterPort) {
   }
 
   // Minimal RESP array parser: returns [array, bytesRead]
-  // Minimal RESP array parser: returns [array, bytesRead]
   function tryParseRESP(buf) {
     if (!buf.length || buf[0] !== 42) return [null, 0]; // 42 is '*'
     let str = buf.toString();
@@ -331,220 +330,353 @@ server = net.createServer((connection) => {
   connection.isReplica = false;
   connection.lastAckOffset = 0;
 
+  connection.leftover = connection.leftover || Buffer.alloc(0);
+
   connection.on("data", (data) => {
+    connection.leftover = Buffer.concat([connection.leftover, data]);
     // Debug print of raw command received
     console.log("Master received:", data.toString());
 
-    const cmdArr = parseRESP(data);
-    if (!cmdArr || !cmdArr[0]) return;
+    let offset = 0;
+    while (offset < connection.leftover.length) {
+      const [cmdArr, bytesRead] = tryParseRESP(connection.leftover.slice(offset));
+      if (!cmdArr || bytesRead === 0) break;
 
-    const command = cmdArr[0].toLowerCase();
+      // ---- BEGIN your command logic ----
+      const command = cmdArr[0].toLowerCase();
 
-    // ==== REPLICATION HANDSHAKE ====
-    if (command === "psync") {
-      connection.isReplica = true;
-      connection.lastAckOffset = 0;
-      replicaSockets.push(connection);
-      // Send FULLRESYNC and then empty RDB bulk string.
-      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
-      connection.write(`$${EMPTY_RDB.length}\r\n`);
-      connection.write(EMPTY_RDB);
-      return;
-    }
-
-    // Handle REPLCONF ACK reply from replica (WAIT support)
-    if (
-      connection.isReplica &&
-      command === "replconf" &&
-      cmdArr[1] &&
-      cmdArr[1].toLowerCase() === "ack" &&
-      cmdArr[2]
-    ) {
-      const ackOffset = parseInt(cmdArr[2], 10) || 0;
-      connection.lastAckOffset = ackOffset;
-      resolveWAITs();
-      return;
-    }
-    // Always respond to REPLCONF commands with +OK
-    if (command === "replconf") {
-      connection.write("+OK\r\n");
-      return;
-    }
-
-    // ==== MAIN COMMANDS (SET, GET, INCR, etc.) ====
-    if (command === "ping") {
-      connection.write("+PONG\r\n");
-    } else if (command === "echo") {
-      const message = cmdArr[1] || "";
-      connection.write(`$${message.length}\r\n${message}\r\n`);
-    } else if (command === "set") {
-      // Standard SET with optional PX
-      const key = cmdArr[1];
-      const value = cmdArr[2];
-      let expiresAt = null;
-      if (cmdArr.length >= 5 && cmdArr[3].toLowerCase() === "px") {
-        const px = parseInt(cmdArr[4], 10);
-        expiresAt = Date.now() + px;
+      // ==== REPLICATION HANDSHAKE ====
+      if (command === "psync") {
+        connection.isReplica = true;
+        connection.lastAckOffset = 0;
+        replicaSockets.push(connection);
+        connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
+        connection.write(`$${EMPTY_RDB.length}\r\n`);
+        connection.write(EMPTY_RDB);
+        offset += bytesRead;
+        continue;
       }
-      db[key] = { value, expiresAt, type: "string" };
-      connection.write("+OK\r\n");
 
-      // Propagate to replicas if not from a replica
-      if (!connection.isReplica && replicaSockets.length > 0) {
-        const respCmd = encodeRespArray(cmdArr);
-        masterOffset += Buffer.byteLength(respCmd, "utf8");
-        replicaSockets.forEach((sock) => {
-          if (sock.writable) {
-            sock.write(respCmd);
+      // Handle REPLCONF ACK reply from replica (WAIT support)
+      if (
+        connection.isReplica &&
+        command === "replconf" &&
+        cmdArr[1] &&
+        cmdArr[1].toLowerCase() === "ack" &&
+        cmdArr[2]
+      ) {
+        const ackOffset = parseInt(cmdArr[2], 10) || 0;
+        connection.lastAckOffset = ackOffset;
+        resolveWAITs();
+        offset += bytesRead;
+        continue;
+      }
+
+      // Always respond to REPLCONF commands with +OK
+      if (command === "replconf") {
+        connection.write("+OK\r\n");
+        offset += bytesRead;
+        continue;
+      }
+
+      // ==== MAIN COMMANDS (SET, GET, INCR, etc.) ====
+      if (command === "ping") {
+        connection.write("+PONG\r\n");
+      } else if (command === "echo") {
+        const message = cmdArr[1] || "";
+        connection.write(`$${message.length}\r\n${message}\r\n`);
+      } else if (command === "set") {
+        // Standard SET with optional PX
+        const key = cmdArr[1];
+        const value = cmdArr[2];
+        let expiresAt = null;
+        if (cmdArr.length >= 5 && cmdArr[3].toLowerCase() === "px") {
+          const px = parseInt(cmdArr[4], 10);
+          expiresAt = Date.now() + px;
+        }
+        db[key] = { value, expiresAt, type: "string" };
+        connection.write("+OK\r\n");
+
+        // Propagate to replicas if not from a replica
+        if (!connection.isReplica && replicaSockets.length > 0) {
+          const respCmd = encodeRespArray(cmdArr);
+          masterOffset += Buffer.byteLength(respCmd, "utf8");
+          replicaSockets.forEach((sock) => {
+            if (sock.writable) {
+              sock.write(respCmd);
+            }
+          });
+        }
+      } else if (command === "multi") {
+        // Begin a new transaction (queuing is not required yet)
+        connection.inTransaction = true;
+        connection.write("+OK\r\n");
+        offset += bytesRead;
+        continue;
+      }
+
+      // --- MULTI/EXEC Transaction Handling ---
+      if (command === "exec") {
+        if (!connection.inTransaction) {
+          connection.write("-ERR EXEC without MULTI\r\n");
+          offset += bytesRead;
+          continue;
+        }
+        connection.inTransaction = false; // End transaction mode
+        connection.write("*0\r\n"); // RESP empty array (no commands queued)
+        offset += bytesRead;
+        continue;
+      }
+
+      // Other commands (GET, INCR, etc.)
+      if (command === "get") {
+        const key = cmdArr[1];
+        const record = db[key];
+        if (record) {
+          if (record.expiresAt && Date.now() >= record.expiresAt) {
+            delete db[key];
+            connection.write("$-1\r\n");
+          } else {
+            const value = record.value;
+            connection.write(`$${value.length}\r\n${value}\r\n`);
           }
-        });
-      }
-    } // --- MULTI/EXEC Transaction Handling ---
-    else if (command === "multi") {
-      // Begin a new transaction (queuing is not required yet)
-      connection.inTransaction = true;
-      connection.write("+OK\r\n");
-      return;
-    }
-
-    if (command === "exec") {
-      if (!connection.inTransaction) {
-        connection.write("-ERR EXEC without MULTI\r\n");
-        return;
-      }
-      connection.inTransaction = false; // End transaction mode
-      connection.write("*0\r\n"); // RESP empty array (no commands queued)
-      return;
-    } else if (command === "get") {
-      const key = cmdArr[1];
-      const record = db[key];
-      if (record) {
-        if (record.expiresAt && Date.now() >= record.expiresAt) {
-          delete db[key];
+        } else {
           connection.write("$-1\r\n");
-        } else {
-          const value = record.value;
-          connection.write(`$${value.length}\r\n${value}\r\n`);
         }
-      } else {
-        connection.write("$-1\r\n");
-      }
-    } else if (command === "incr") {
-      const key = cmdArr[1];
-      if (db[key] === undefined) {
-        // Key does not exist: set to 1
-        db[key] = { value: "1", type: "string" };
-        connection.write(encodeRespInteger(1));
-      } else if (db[key].type === "string" && /^-?\d+$/.test(db[key].value)) {
-        // Key exists and value is integer: increment
-        let num = parseInt(db[key].value, 10);
-        num += 1;
-        db[key].value = num.toString();
-        connection.write(encodeRespInteger(num));
-      } else {
-        // Key exists but value is NOT an integer
-        connection.write("-ERR value is not an integer or out of range\r\n");
-      }
-    } else if (command === "xadd") {
-      // XADD command: Add to stream, handle IDs (full/partial/auto), error checks
-      const streamKey = cmdArr[1];
-      let id = cmdArr[2];
-      let ms, seq;
+      } else if (command === "incr") {
+        const key = cmdArr[1];
+        if (db[key] === undefined) {
+          // Key does not exist: set to 1
+          db[key] = { value: "1", type: "string" };
+          connection.write(encodeRespInteger(1));
+        } else if (db[key].type === "string" && /^-?\d+$/.test(db[key].value)) {
+          // Key exists and value is integer: increment
+          let num = parseInt(db[key].value, 10);
+          num += 1;
+          db[key].value = num.toString();
+          connection.write(encodeRespInteger(num));
+        } else {
+          // Key exists but value is NOT an integer
+          connection.write("-ERR value is not an integer or out of range\r\n");
+        }
+      } else if (command === "xadd") {
+        // XADD command: Add to stream, handle IDs (full/partial/auto), error checks
+        const streamKey = cmdArr[1];
+        let id = cmdArr[2];
+        let ms, seq;
 
-      if (id === "*") {
-        ms = Date.now();
-        seq = 0;
-        if (
-          db[streamKey] &&
-          db[streamKey].type === "stream" &&
-          db[streamKey].entries.length > 0
-        ) {
-          const last = db[streamKey].entries[db[streamKey].entries.length - 1];
-          const [lastMs, lastSeq] = last.id.split("-").map(Number);
-          if (lastMs === ms) {
-            seq = lastSeq + 1;
-          }
-        }
-        id = `${ms}-${seq}`;
-      } else if (/^\d+-\*$/.test(id)) {
-        ms = Number(id.split("-")[0]);
-        if (!db[streamKey] || db[streamKey].entries.length === 0) {
-          seq = ms === 0 ? 1 : 0;
-        } else {
-          let maxSeq = -1;
-          for (let i = db[streamKey].entries.length - 1; i >= 0; i--) {
-            const [entryMs, entrySeq] = db[streamKey].entries[i].id
-              .split("-")
-              .map(Number);
-            if (entryMs === ms) {
-              maxSeq = Math.max(maxSeq, entrySeq);
+        if (id === "*") {
+          ms = Date.now();
+          seq = 0;
+          if (
+            db[streamKey] &&
+            db[streamKey].type === "stream" &&
+            db[streamKey].entries.length > 0
+          ) {
+            const last = db[streamKey].entries[db[streamKey].entries.length - 1];
+            const [lastMs, lastSeq] = last.id.split("-").map(Number);
+            if (lastMs === ms) {
+              seq = lastSeq + 1;
             }
-            if (entryMs < ms) break;
           }
-          seq = maxSeq >= 0 ? maxSeq + 1 : ms === 0 ? 1 : 0;
+          id = `${ms}-${seq}`;
+        } else if (/^\d+-\*$/.test(id)) {
+          ms = Number(id.split("-")[0]);
+          if (!db[streamKey] || db[streamKey].entries.length === 0) {
+            seq = ms === 0 ? 1 : 0;
+          } else {
+            let maxSeq = -1;
+            for (let i = db[streamKey].entries.length - 1; i >= 0; i--) {
+              const [entryMs, entrySeq] = db[streamKey].entries[i].id
+                .split("-")
+                .map(Number);
+              if (entryMs === ms) {
+                maxSeq = Math.max(maxSeq, entrySeq);
+              }
+              if (entryMs < ms) break;
+            }
+            seq = maxSeq >= 0 ? maxSeq + 1 : ms === 0 ? 1 : 0;
+          }
+          id = `${ms}-${seq}`;
+        } else {
+          const parts = id.split("-");
+          ms = Number(parts[0]);
+          seq = Number(parts[1]);
         }
-        id = `${ms}-${seq}`;
-      } else {
-        const parts = id.split("-");
-        ms = Number(parts[0]);
-        seq = Number(parts[1]);
-      }
-      // Validate id
-      if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
-        connection.write(
-          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
-        );
-        return;
-      }
-      if (ms === 0 && seq === 0) {
-        connection.write(
-          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
-        );
-        return;
-      }
-      if (ms === 0 && seq < 1) {
-        connection.write(
-          "-ERR The ID specified in XADD must be greater than 0-0\r\n"
-        );
-        return;
-      }
-      // Prepare field-value pairs
-      const pairs = {};
-      for (let i = 3; i + 1 < cmdArr.length; i += 2) {
-        pairs[cmdArr[i]] = cmdArr[i + 1];
-      }
-      if (!db[streamKey]) {
-        db[streamKey] = { type: "stream", entries: [] };
-      }
-      // Ensure entry ID is strictly greater
-      const entries = db[streamKey].entries;
-      if (entries.length > 0) {
-        const last = entries[entries.length - 1];
-        const [lastMs, lastSeq] = last.id.split("-").map(Number);
-        if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
+        // Validate id
+        if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
           connection.write(
-            "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+            "-ERR The ID specified in XADD must be greater than 0-0\r\n"
           );
-          return;
+          continue;
         }
-      }
-      db[streamKey].entries.push({ id, ...pairs });
-      connection.write(`$${id.length}\r\n${id}\r\n`);
+        if (ms === 0 && seq === 0) {
+          connection.write(
+            "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+          );
+          continue;
+        }
+        if (ms === 0 && seq < 1) {
+          connection.write(
+            "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+          );
+          continue;
+        }
+        // Prepare field-value pairs
+        const pairs = {};
+        for (let i = 3; i + 1 < cmdArr.length; i += 2) {
+          pairs[cmdArr[i]] = cmdArr[i + 1];
+        }
+        if (!db[streamKey]) {
+          db[streamKey] = { type: "stream", entries: [] };
+        }
+        // Ensure entry ID is strictly greater
+        const entries = db[streamKey].entries;
+        if (entries.length > 0) {
+          const last = entries[entries.length - 1];
+          const [lastMs, lastSeq] = last.id.split("-").map(Number);
+          if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
+            connection.write(
+              "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+            );
+            continue;
+          }
+        }
+        db[streamKey].entries.push({ id, ...pairs });
+        connection.write(`$${id.length}\r\n${id}\r\n`);
 
-      // XREAD BLOCK support: wake up blocked clients
-      let remaining = [];
-      for (let req of pendingXReads) {
-        let found = [];
-        for (let i = 0; i < req.streams.length; ++i) {
-          const k = req.streams[i];
-          let id = req.ids[i];
-          if (id === "$") {
-            if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
-              id = db[k].entries[db[k].entries.length - 1].id;
+        // XREAD BLOCK support: wake up blocked clients
+        let remaining = [];
+        for (let req of pendingXReads) {
+          let found = [];
+          for (let i = 0; i < req.streams.length; ++i) {
+            const k = req.streams[i];
+            let id = req.ids[i];
+            if (id === "$") {
+              if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
+                id = db[k].entries[db[k].entries.length - 1].id;
+              } else {
+                id = "0-0";
+              }
+            }
+            const arr = [];
+            if (db[k] && db[k].type === "stream") {
+              let [lastMs, lastSeq] = id.split("-").map(Number);
+              for (const entry of db[k].entries) {
+                let [eMs, eSeq] = entry.id.split("-").map(Number);
+                if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+                  let fields = [];
+                  for (let [kk, vv] of Object.entries(entry))
+                    if (kk !== "id") fields.push(kk, vv);
+                  arr.push([entry.id, fields]);
+                }
+              }
+            }
+            if (arr.length) found.push([k, arr]);
+          }
+          if (found.length) {
+            if (req.timer) clearTimeout(req.timer);
+            req.conn.write(encodeRespArrayDeep(found));
+          } else {
+            remaining.push(req);
+          }
+        }
+        pendingXReads = remaining;
+      } else if (command === "xrange") {
+        // XRANGE: Return a range of stream entries.
+        const streamKey = cmdArr[1];
+        let start = cmdArr[2];
+        let end = cmdArr[3];
+        if (!db[streamKey] || db[streamKey].type !== "stream") {
+          connection.write("*0\r\n");
+          continue;
+        }
+        function parseId(idStr, isEnd) {
+          if (idStr === "-") {
+            return [Number.MIN_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
+          }
+          if (idStr === "+") {
+            return [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
+          }
+          if (idStr.includes("-")) {
+            const [ms, seq] = idStr.split("-");
+            return [parseInt(ms, 10), parseInt(seq, 10)];
+          } else {
+            if (isEnd) {
+              return [parseInt(idStr, 10), Number.MAX_SAFE_INTEGER];
             } else {
-              id = "0-0";
+              return [parseInt(idStr, 10), 0];
             }
           }
+        }
+        const [startMs, startSeq] = parseId(start, false);
+        const [endMs, endSeq] = parseId(end, true);
+        const result = [];
+        for (const entry of db[streamKey].entries) {
+          const [eMs, eSeq] = entry.id.split("-").map(Number);
+          const afterStart =
+            eMs > startMs || (eMs === startMs && eSeq >= startSeq);
+          const beforeEnd = eMs < endMs || (eMs === endMs && eSeq <= endSeq);
+          if (afterStart && beforeEnd) {
+            const pairs = [];
+            for (const [k, v] of Object.entries(entry)) {
+              if (k === "id") continue;
+              pairs.push(k, v);
+            }
+            result.push([entry.id, pairs]);
+          }
+        }
+        connection.write(encodeRespArrayDeep(result));
+      } else if (command === "xread") {
+        // XREAD with BLOCK: blocks until stream gets new messages or timeout.
+        let blockMs = null;
+        let blockIdx = cmdArr.findIndex((x) => x.toLowerCase() === "block");
+        let streamsIdx = cmdArr.findIndex((x) => x.toLowerCase() === "streams");
+        if (blockIdx !== -1) {
+          blockMs = parseInt(cmdArr[blockIdx + 1], 10);
+        }
+        if (streamsIdx === -1) {
+          connection.write("*0\r\n");
+          continue;
+        }
+        const streams = [];
+        const ids = [];
+        let s = streamsIdx + 1;
+        while (
+          s < cmdArr.length &&
+          !cmdArr[s].includes("-") &&
+          cmdArr[s] !== "$"
+        ) {
+          streams.push(cmdArr[s]);
+          s++;
+        }
+        while (s < cmdArr.length) {
+          ids.push(cmdArr[s]);
+          s++;
+        }
+        const resolvedIds = [];
+        for (let i = 0; i < streams.length; ++i) {
+          const key = streams[i];
+          const reqId = ids[i];
+          if (reqId === "$") {
+            if (
+              db[key] &&
+              db[key].type === "stream" &&
+              db[key].entries.length > 0
+            ) {
+              const lastEntry = db[key].entries[db[key].entries.length - 1];
+              resolvedIds.push(lastEntry.id);
+            } else {
+              resolvedIds.push("0-0");
+            }
+          } else {
+            resolvedIds.push(reqId);
+          }
+        }
+        let found = [];
+        for (let i = 0; i < streams.length; ++i) {
+          const k = streams[i];
+          const id = resolvedIds[i];
           const arr = [];
           if (db[k] && db[k].type === "stream") {
             let [lastMs, lastSeq] = id.split("-").map(Number);
@@ -561,220 +693,109 @@ server = net.createServer((connection) => {
           if (arr.length) found.push([k, arr]);
         }
         if (found.length) {
-          if (req.timer) clearTimeout(req.timer);
-          req.conn.write(encodeRespArrayDeep(found));
-        } else {
-          remaining.push(req);
+          connection.write(encodeRespArrayDeep(found));
+          continue;
         }
-      }
-      pendingXReads = remaining;
-    } else if (command === "xrange") {
-      // XRANGE: Return a range of stream entries.
-      const streamKey = cmdArr[1];
-      let start = cmdArr[2];
-      let end = cmdArr[3];
-      if (!db[streamKey] || db[streamKey].type !== "stream") {
-        connection.write("*0\r\n");
-        return;
-      }
-      function parseId(idStr, isEnd) {
-        if (idStr === "-") {
-          return [Number.MIN_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
+        if (blockMs === null) {
+          connection.write("*0\r\n");
+          continue;
         }
-        if (idStr === "+") {
-          return [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
+        let timeout = null;
+        if (blockMs > 0) {
+          timeout = setTimeout(() => {
+            connection.write("$-1\r\n");
+            pendingXReads = pendingXReads.filter(
+              (obj) => obj.conn !== connection
+            );
+          }, blockMs);
         }
-        if (idStr.includes("-")) {
-          const [ms, seq] = idStr.split("-");
-          return [parseInt(ms, 10), parseInt(seq, 10)];
-        } else {
-          if (isEnd) {
-            return [parseInt(idStr, 10), Number.MAX_SAFE_INTEGER];
+        pendingXReads.push({
+          conn: connection,
+          streams,
+          ids: resolvedIds,
+          timer: timeout,
+        });
+      } else if (command === "type") {
+        // TYPE command: tells if value is string/stream/none
+        const key = cmdArr[1];
+        if (db[key]) {
+          if (db[key].type === "stream") {
+            connection.write("+stream\r\n");
           } else {
-            return [parseInt(idStr, 10), 0];
+            connection.write("+string\r\n");
           }
+        } else {
+          connection.write("+none\r\n");
         }
-      }
-      const [startMs, startSeq] = parseId(start, false);
-      const [endMs, endSeq] = parseId(end, true);
-      const result = [];
-      for (const entry of db[streamKey].entries) {
-        const [eMs, eSeq] = entry.id.split("-").map(Number);
-        const afterStart =
-          eMs > startMs || (eMs === startMs && eSeq >= startSeq);
-        const beforeEnd = eMs < endMs || (eMs === endMs && eSeq <= endSeq);
-        if (afterStart && beforeEnd) {
-          const pairs = [];
-          for (const [k, v] of Object.entries(entry)) {
-            if (k === "id") continue;
-            pairs.push(k, v);
-          }
-          result.push([entry.id, pairs]);
-        }
-      }
-      connection.write(encodeRespArrayDeep(result));
-    } else if (command === "xread") {
-      // XREAD with BLOCK: blocks until stream gets new messages or timeout.
-      let blockMs = null;
-      let blockIdx = cmdArr.findIndex((x) => x.toLowerCase() === "block");
-      let streamsIdx = cmdArr.findIndex((x) => x.toLowerCase() === "streams");
-      if (blockIdx !== -1) {
-        blockMs = parseInt(cmdArr[blockIdx + 1], 10);
-      }
-      if (streamsIdx === -1) {
-        connection.write("*0\r\n");
-        return;
-      }
-      const streams = [];
-      const ids = [];
-      let s = streamsIdx + 1;
-      while (
-        s < cmdArr.length &&
-        !cmdArr[s].includes("-") &&
-        cmdArr[s] !== "$"
+      } else if (
+        command === "config" &&
+        cmdArr[1] &&
+        cmdArr[1].toLowerCase() === "get" &&
+        cmdArr[2]
       ) {
-        streams.push(cmdArr[s]);
-        s++;
-      }
-      while (s < cmdArr.length) {
-        ids.push(cmdArr[s]);
-        s++;
-      }
-      const resolvedIds = [];
-      for (let i = 0; i < streams.length; ++i) {
-        const key = streams[i];
-        const reqId = ids[i];
-        if (reqId === "$") {
-          if (
-            db[key] &&
-            db[key].type === "stream" &&
-            db[key].entries.length > 0
-          ) {
-            const lastEntry = db[key].entries[db[key].entries.length - 1];
-            resolvedIds.push(lastEntry.id);
-          } else {
-            resolvedIds.push("0-0");
-          }
+        // CONFIG GET dir/dbfilename
+        const param = cmdArr[2].toLowerCase();
+        let value = "";
+        if (param === "dir") value = dir;
+        else if (param === "dbfilename") value = dbfilename;
+        connection.write(
+          `*2\r\n$${param.length}\r\n${param}\r\n$${value.length}\r\n${value}\r\n`
+        );
+      } else if (command === "keys") {
+        // KEYS * support (star and prefix match)
+        const pattern = cmdArr[1];
+        let keys = [];
+        if (pattern === "*") {
+          keys = Object.keys(db);
+        } else if (pattern.endsWith("*")) {
+          const prefix = pattern.slice(0, -1);
+          keys = Object.keys(db).filter((k) => k.startsWith(prefix));
         } else {
-          resolvedIds.push(reqId);
+          keys = Object.keys(db).filter((k) => k === pattern);
         }
-      }
-      let found = [];
-      for (let i = 0; i < streams.length; ++i) {
-        const k = streams[i];
-        const id = resolvedIds[i];
-        const arr = [];
-        if (db[k] && db[k].type === "stream") {
-          let [lastMs, lastSeq] = id.split("-").map(Number);
-          for (const entry of db[k].entries) {
-            let [eMs, eSeq] = entry.id.split("-").map(Number);
-            if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
-              let fields = [];
-              for (let [kk, vv] of Object.entries(entry))
-                if (kk !== "id") fields.push(kk, vv);
-              arr.push([entry.id, fields]);
-            }
-          }
+        let resp = `*${keys.length}\r\n`;
+        for (const k of keys) {
+          resp += `$${k.length}\r\n${k}\r\n`;
         }
-        if (arr.length) found.push([k, arr]);
-      }
-      if (found.length) {
-        connection.write(encodeRespArrayDeep(found));
-        return;
-      }
-      if (blockMs === null) {
-        connection.write("*0\r\n");
-        return;
-      }
-      let timeout = null;
-      if (blockMs > 0) {
-        timeout = setTimeout(() => {
-          connection.write("$-1\r\n");
-          pendingXReads = pendingXReads.filter(
-            (obj) => obj.conn !== connection
-          );
-        }, blockMs);
-      }
-      pendingXReads.push({
-        conn: connection,
-        streams,
-        ids: resolvedIds,
-        timer: timeout,
-      });
-    } else if (command === "type") {
-      // TYPE command: tells if value is string/stream/none
-      const key = cmdArr[1];
-      if (db[key]) {
-        if (db[key].type === "stream") {
-          connection.write("+stream\r\n");
-        } else {
-          connection.write("+string\r\n");
+        connection.write(resp);
+      } else if (
+        command === "info" &&
+        cmdArr[1] &&
+        cmdArr[1].toLowerCase() === "replication"
+      ) {
+        // INFO replication: returns replication role/info
+        let lines = [`role:${role}`];
+        if (role === "master") {
+          lines.push(`master_replid:${masterReplId}`);
+          lines.push(`master_repl_offset:0`);
         }
-      } else {
-        connection.write("+none\r\n");
+        const infoStr = lines.join("\r\n");
+        connection.write(`$${infoStr.length}\r\n${infoStr}\r\n`);
       }
-    } else if (
-      command === "config" &&
-      cmdArr[1] &&
-      cmdArr[1].toLowerCase() === "get" &&
-      cmdArr[2]
-    ) {
-      // CONFIG GET dir/dbfilename
-      const param = cmdArr[2].toLowerCase();
-      let value = "";
-      if (param === "dir") value = dir;
-      else if (param === "dbfilename") value = dbfilename;
-      connection.write(
-        `*2\r\n$${param.length}\r\n${param}\r\n$${value.length}\r\n${value}\r\n`
-      );
-    } else if (command === "keys") {
-      // KEYS * support (star and prefix match)
-      const pattern = cmdArr[1];
-      let keys = [];
-      if (pattern === "*") {
-        keys = Object.keys(db);
-      } else if (pattern.endsWith("*")) {
-        const prefix = pattern.slice(0, -1);
-        keys = Object.keys(db).filter((k) => k.startsWith(prefix));
-      } else {
-        keys = Object.keys(db).filter((k) => k === pattern);
+
+      // REPLCONF GETACK * (ask replicas to send their offsets for WAIT)
+      if (
+        command === "replconf" &&
+        cmdArr[1] &&
+        cmdArr[1].toLowerCase() === "getack"
+      ) {
+        const offsetStr = masterOffset.toString();
+        const resp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${offsetStr.length}\r\n${offsetStr}\r\n`;
+        connection.write(resp);
+        offset += bytesRead;
+        continue;
       }
-      let resp = `*${keys.length}\r\n`;
-      for (const k of keys) {
-        resp += `$${k.length}\r\n${k}\r\n`;
+      // WAIT command (replication): blocks until N replicas ACK offset or timeout
+      if (command === "wait") {
+        const numReplicas = parseInt(cmdArr[1], 10) || 0;
+        const timeout = parseInt(cmdArr[2], 10) || 0;
+        handleWAITCommand(connection, numReplicas, timeout);
       }
-      connection.write(resp);
-    } else if (
-      command === "info" &&
-      cmdArr[1] &&
-      cmdArr[1].toLowerCase() === "replication"
-    ) {
-      // INFO replication: returns replication role/info
-      let lines = [`role:${role}`];
-      if (role === "master") {
-        lines.push(`master_replid:${masterReplId}`);
-        lines.push(`master_repl_offset:0`);
-      }
-      const infoStr = lines.join("\r\n");
-      connection.write(`$${infoStr.length}\r\n${infoStr}\r\n`);
+
+      offset += bytesRead;
     }
-    // REPLCONF GETACK * (ask replicas to send their offsets for WAIT)
-    if (
-      command === "replconf" &&
-      cmdArr[1] &&
-      cmdArr[1].toLowerCase() === "getack"
-    ) {
-      const offsetStr = masterOffset.toString();
-      const resp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${offsetStr.length}\r\n${offsetStr}\r\n`;
-      connection.write(resp);
-      return;
-    }
-    // WAIT command (replication): blocks until N replicas ACK offset or timeout
-    if (command === "wait") {
-      const numReplicas = parseInt(cmdArr[1], 10) || 0;
-      const timeout = parseInt(cmdArr[2], 10) || 0;
-      handleWAITCommand(connection, numReplicas, timeout);
-    }
+    // Remove processed bytes from buffer
+    connection.leftover = connection.leftover.slice(offset);
   });
 
   // On disconnect/error, clean up replica/socket state
@@ -788,7 +809,7 @@ server = net.createServer((connection) => {
     }
     pendingXReads = pendingXReads.filter((p) => p.conn !== connection);
   });
-});
+}); // <--- THIS WAS THE MISSING CURLY BRACE
 
 server.listen(port, "127.0.0.1");
 
@@ -844,4 +865,29 @@ function handleWAITCommand(clientConn, numReplicas, timeout) {
 }
 function resolveWAITs() {
   pendingWAITs.forEach((w) => w.maybeResolve());
+}
+
+// Minimal RESP array parser: returns [array, bytesRead]
+// (used in both master and replica code)
+function tryParseRESP(buf) {
+  if (!buf.length || buf[0] !== 42) return [null, 0]; // 42 is '*'
+  let str = buf.toString();
+  let firstLineEnd = str.indexOf("\r\n");
+  if (firstLineEnd === -1) return [null, 0];
+  let numElems = parseInt(str.slice(1, firstLineEnd), 10);
+  let elems = [];
+  let cursor = firstLineEnd + 2;
+  for (let i = 0; i < numElems; i++) {
+    if (buf[cursor] !== 36) return [null, 0]; // 36 is '$'
+    let lenLineEnd = buf.indexOf("\r\n", cursor);
+    if (lenLineEnd === -1) return [null, 0];
+    let len = parseInt(buf.slice(cursor + 1, lenLineEnd).toString(), 10);
+    let valStart = lenLineEnd + 2;
+    let valEnd = valStart + len;
+    if (valEnd + 2 > buf.length) return [null, 0];
+    let val = buf.slice(valStart, valEnd).toString();
+    elems.push(val);
+    cursor = valEnd + 2;
+  }
+  return [elems, cursor];
 }
