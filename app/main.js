@@ -140,7 +140,9 @@ if (role === "slave" && masterHost && masterPort) {
         arr[1].toLowerCase() === "getack"
       ) {
         // RESP Array: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
-        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${masterOffset.toString().length}\r\n${masterOffset}\r\n`;
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
+          masterOffset.toString().length
+        }\r\n${masterOffset}\r\n`;
         masterConnection.write(ackResp);
         masterOffset += bytesRead; // Only update offset after sending
       } else {
@@ -165,7 +167,18 @@ if (role === "slave" && masterHost && masterPort) {
         const px = parseInt(cmdArr[4], 10);
         expiresAt = Date.now() + px;
       }
-      db[key] = { value, expiresAt };
+      db[key] = { value, expiresAt, type: "string" };
+      connection.write("+OK\r\n"); // <- ALWAYS send this for SET!
+
+      // Replication: send to all replicas if not a replica connection
+      if (!connection.isReplica && replicaSockets.length > 0) {
+        const respCmd = encodeRespArray(cmdArr);
+        masterOffset += Buffer.byteLength(respCmd, "utf8");
+        replicaSockets.forEach((sock) => {
+          if (sock.writable) sock.write(respCmd);
+        });
+      }
+      return; // (optional, prevents running into other logic)
     }
   }
 
