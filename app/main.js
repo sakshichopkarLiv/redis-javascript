@@ -470,7 +470,6 @@ server = net.createServer((connection) => {
         connection.write("$-1\r\n");
       }
     } else if (command === "xadd") {
-      // ==== STREAM SUPPORT START + VALIDATION ====
       const streamKey = cmdArr[1];
       let id = cmdArr[2];
 
@@ -488,7 +487,42 @@ server = net.createServer((connection) => {
         db[streamKey].type = "stream";
       }
 
-      // ---- Your ID validation logic (optional: you can keep it here) ----
+      // ----- FIX: Handle ID -----
+      let ms, seq;
+      if (id === "*") {
+        ms = Date.now();
+        seq = 0;
+        // If previous entry has same ms, increment sequence
+        const entries = db[streamKey].entries;
+        if (entries.length > 0) {
+          const [lastMs, lastSeq] = entries[entries.length - 1].id
+            .split("-")
+            .map(Number);
+          if (lastMs === ms) {
+            seq = lastSeq + 1;
+          }
+        }
+        id = `${ms}-${seq}`;
+      }
+      // You may also want to support <ms>-* for bonus
+      else if (/^\d+-\*$/.test(id)) {
+        ms = Number(id.split("-")[0]);
+        seq = 0;
+        const entries = db[streamKey].entries;
+        if (entries.length > 0) {
+          let maxSeq = -1;
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const [entryMs, entrySeq] = entries[i].id.split("-").map(Number);
+            if (entryMs === ms) {
+              maxSeq = Math.max(maxSeq, entrySeq);
+            }
+            if (entryMs < ms) break;
+          }
+          if (maxSeq >= 0) seq = maxSeq + 1;
+          else seq = 0;
+        }
+        id = `${ms}-${seq}`;
+      }
 
       db[streamKey].entries.push({ id, ...pairs });
       connection.write(`$${id.length}\r\n${id}\r\n`);
