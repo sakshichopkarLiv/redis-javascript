@@ -339,7 +339,9 @@ server = net.createServer((connection) => {
 
     let offset = 0;
     while (offset < connection.leftover.length) {
-      const [cmdArr, bytesRead] = tryParseRESP(connection.leftover.slice(offset));
+      const [cmdArr, bytesRead] = tryParseRESP(
+        connection.leftover.slice(offset)
+      );
       if (!cmdArr || bytesRead === 0) break;
 
       // ---- BEGIN your command logic ----
@@ -473,7 +475,8 @@ server = net.createServer((connection) => {
             db[streamKey].type === "stream" &&
             db[streamKey].entries.length > 0
           ) {
-            const last = db[streamKey].entries[db[streamKey].entries.length - 1];
+            const last =
+              db[streamKey].entries[db[streamKey].entries.length - 1];
             const [lastMs, lastSeq] = last.id.split("-").map(Number);
             if (lastMs === ms) {
               seq = lastSeq + 1;
@@ -503,25 +506,27 @@ server = net.createServer((connection) => {
           ms = Number(parts[0]);
           seq = Number(parts[1]);
         }
+
         // Validate id
         if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
           connection.write(
             "-ERR The ID specified in XADD must be greater than 0-0\r\n"
           );
-          continue;
+          return;
         }
         if (ms === 0 && seq === 0) {
           connection.write(
             "-ERR The ID specified in XADD must be greater than 0-0\r\n"
           );
-          continue;
+          return;
         }
         if (ms === 0 && seq < 1) {
           connection.write(
             "-ERR The ID specified in XADD must be greater than 0-0\r\n"
           );
-          continue;
+          return;
         }
+
         // Prepare field-value pairs
         const pairs = {};
         for (let i = 3; i + 1 < cmdArr.length; i += 2) {
@@ -539,7 +544,7 @@ server = net.createServer((connection) => {
             connection.write(
               "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
             );
-            continue;
+            return;
           }
         }
         db[streamKey].entries.push({ id, ...pairs });
@@ -553,7 +558,11 @@ server = net.createServer((connection) => {
             const k = req.streams[i];
             let id = req.ids[i];
             if (id === "$") {
-              if (db[k] && db[k].type === "stream" && db[k].entries.length > 0) {
+              if (
+                db[k] &&
+                db[k].type === "stream" &&
+                db[k].entries.length > 0
+              ) {
                 id = db[k].entries[db[k].entries.length - 1].id;
               } else {
                 id = "0-0";
@@ -582,139 +591,6 @@ server = net.createServer((connection) => {
           }
         }
         pendingXReads = remaining;
-      } else if (command === "xrange") {
-        // XRANGE: Return a range of stream entries.
-        const streamKey = cmdArr[1];
-        let start = cmdArr[2];
-        let end = cmdArr[3];
-        if (!db[streamKey] || db[streamKey].type !== "stream") {
-          connection.write("*0\r\n");
-          continue;
-        }
-        function parseId(idStr, isEnd) {
-          if (idStr === "-") {
-            return [Number.MIN_SAFE_INTEGER, Number.MIN_SAFE_INTEGER];
-          }
-          if (idStr === "+") {
-            return [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
-          }
-          if (idStr.includes("-")) {
-            const [ms, seq] = idStr.split("-");
-            return [parseInt(ms, 10), parseInt(seq, 10)];
-          } else {
-            if (isEnd) {
-              return [parseInt(idStr, 10), Number.MAX_SAFE_INTEGER];
-            } else {
-              return [parseInt(idStr, 10), 0];
-            }
-          }
-        }
-        const [startMs, startSeq] = parseId(start, false);
-        const [endMs, endSeq] = parseId(end, true);
-        const result = [];
-        for (const entry of db[streamKey].entries) {
-          const [eMs, eSeq] = entry.id.split("-").map(Number);
-          const afterStart =
-            eMs > startMs || (eMs === startMs && eSeq >= startSeq);
-          const beforeEnd = eMs < endMs || (eMs === endMs && eSeq <= endSeq);
-          if (afterStart && beforeEnd) {
-            const pairs = [];
-            for (const [k, v] of Object.entries(entry)) {
-              if (k === "id") continue;
-              pairs.push(k, v);
-            }
-            result.push([entry.id, pairs]);
-          }
-        }
-        connection.write(encodeRespArrayDeep(result));
-      } else if (command === "xread") {
-        // XREAD with BLOCK: blocks until stream gets new messages or timeout.
-        let blockMs = null;
-        let blockIdx = cmdArr.findIndex((x) => x.toLowerCase() === "block");
-        let streamsIdx = cmdArr.findIndex((x) => x.toLowerCase() === "streams");
-        if (blockIdx !== -1) {
-          blockMs = parseInt(cmdArr[blockIdx + 1], 10);
-        }
-        if (streamsIdx === -1) {
-          connection.write("*0\r\n");
-          continue;
-        }
-        const streams = [];
-        const ids = [];
-        let s = streamsIdx + 1;
-        while (
-          s < cmdArr.length &&
-          !cmdArr[s].includes("-") &&
-          cmdArr[s] !== "$"
-        ) {
-          streams.push(cmdArr[s]);
-          s++;
-        }
-        while (s < cmdArr.length) {
-          ids.push(cmdArr[s]);
-          s++;
-        }
-        const resolvedIds = [];
-        for (let i = 0; i < streams.length; ++i) {
-          const key = streams[i];
-          const reqId = ids[i];
-          if (reqId === "$") {
-            if (
-              db[key] &&
-              db[key].type === "stream" &&
-              db[key].entries.length > 0
-            ) {
-              const lastEntry = db[key].entries[db[key].entries.length - 1];
-              resolvedIds.push(lastEntry.id);
-            } else {
-              resolvedIds.push("0-0");
-            }
-          } else {
-            resolvedIds.push(reqId);
-          }
-        }
-        let found = [];
-        for (let i = 0; i < streams.length; ++i) {
-          const k = streams[i];
-          const id = resolvedIds[i];
-          const arr = [];
-          if (db[k] && db[k].type === "stream") {
-            let [lastMs, lastSeq] = id.split("-").map(Number);
-            for (const entry of db[k].entries) {
-              let [eMs, eSeq] = entry.id.split("-").map(Number);
-              if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
-                let fields = [];
-                for (let [kk, vv] of Object.entries(entry))
-                  if (kk !== "id") fields.push(kk, vv);
-                arr.push([entry.id, fields]);
-              }
-            }
-          }
-          if (arr.length) found.push([k, arr]);
-        }
-        if (found.length) {
-          connection.write(encodeRespArrayDeep(found));
-          continue;
-        }
-        if (blockMs === null) {
-          connection.write("*0\r\n");
-          continue;
-        }
-        let timeout = null;
-        if (blockMs > 0) {
-          timeout = setTimeout(() => {
-            connection.write("$-1\r\n");
-            pendingXReads = pendingXReads.filter(
-              (obj) => obj.conn !== connection
-            );
-          }, blockMs);
-        }
-        pendingXReads.push({
-          conn: connection,
-          streams,
-          ids: resolvedIds,
-          timer: timeout,
-        });
       } else if (command === "type") {
         // TYPE command: tells if value is string/stream/none
         const key = cmdArr[1];
