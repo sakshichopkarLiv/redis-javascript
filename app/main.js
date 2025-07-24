@@ -182,6 +182,7 @@ if (role === "slave" && masterHost && masterPort) {
   }
 
   // Minimal RESP array parser: returns [array, bytesRead]
+  // Minimal RESP array parser: returns [array, bytesRead]
   function tryParseRESP(buf) {
     if (!buf.length || buf[0] !== 42) return [null, 0]; // 42 is '*'
     let str = buf.toString();
