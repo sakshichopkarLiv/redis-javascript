@@ -398,6 +398,9 @@ server = net.createServer((connection) => {
           }
         });
       }
+    } else if (command === "multi") {
+      // Respond to MULTI command with OK as per Redis protocol
+      connection.write("+OK\r\n");
     } else if (command === "get") {
       const key = cmdArr[1];
       const record = db[key];
