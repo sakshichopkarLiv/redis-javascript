@@ -35,7 +35,7 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-// Connect to master and send PING if replica
+// ==== REPLICA MODE: receive and apply commands from master ====
 if (role === "slave" && masterHost && masterPort) {
   const masterConnection = net.createConnection(masterPort, masterHost, () => {
     // 1. Send PING as RESP
@@ -43,8 +43,12 @@ if (role === "slave" && masterHost && masterPort) {
   });
 
   let handshakeStep = 0;
+  let awaitingRDB = false;
+  let rdbBytesExpected = 0;
+  let leftover = Buffer.alloc(0); // For buffering incoming data
 
   masterConnection.on("data", (data) => {
+    // During handshake stages
     if (handshakeStep === 0) {
       // 2. After receiving response to PING, send REPLCONF listening-port <PORT>
       const portStr = port.toString();
@@ -52,23 +56,130 @@ if (role === "slave" && masterHost && masterPort) {
         `*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$${portStr.length}\r\n${portStr}\r\n`
       );
       handshakeStep++;
+      return;
     } else if (handshakeStep === 1) {
       // 3. After response, send REPLCONF capa psync2
       masterConnection.write(
         "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
       );
       handshakeStep++;
+      return;
     } else if (handshakeStep === 2) {
       // 4. After response, send PSYNC ? -1
       masterConnection.write("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n");
       handshakeStep++;
+      return;
+    }
+
+    // After handshake: expect +FULLRESYNC ...\r\n$<n>\r\n<rdbfile>
+    if (!awaitingRDB) {
+      const str = data.toString();
+      if (str.startsWith("+FULLRESYNC")) {
+        // Find the $<n>\r\n for the RDB file
+        const idx = str.indexOf('\r\n$');
+        if (idx !== -1) {
+          const rest = str.slice(idx + 3);
+          const match = rest.match(/^(\d+)\r\n/);
+          if (match) {
+            rdbBytesExpected = parseInt(match[1], 10);
+            awaitingRDB = true;
+            // There might be some of the RDB file in this data already:
+            const rdbStart = idx + 3 + match[0].length;
+            const rdbAvailable = data.slice(rdbStart);
+            if (rdbAvailable.length >= rdbBytesExpected) {
+              // Skip RDB, process what's after it
+              const afterRDB = rdbAvailable.slice(rdbBytesExpected);
+              leftover = Buffer.concat([leftover, afterRDB]);
+              processLeftover();
+              awaitingRDB = false;
+            } else {
+              // We'll need to wait for more data for full RDB
+              rdbBytesExpected -= rdbAvailable.length;
+            }
+            return;
+          }
+        }
+      }
+    } else if (awaitingRDB) {
+      // Continue reading RDB bytes
+      if (data.length >= rdbBytesExpected) {
+        const afterRDB = data.slice(rdbBytesExpected);
+        leftover = Buffer.concat([leftover, afterRDB]);
+        processLeftover();
+        awaitingRDB = false;
+      } else {
+        rdbBytesExpected -= data.length;
+        // Still waiting for rest of RDB
+      }
+      return;
+    } else {
+      // Already synced, buffer and process all incoming data
+      leftover = Buffer.concat([leftover, data]);
+      processLeftover();
     }
   });
 
   masterConnection.on("error", (err) => {
     console.log("Error connecting to master:", err.message);
   });
+
+  // Helper to parse and apply all commands from the buffer
+  function processLeftover() {
+    let offset = 0;
+    while (offset < leftover.length) {
+      // Try parsing a RESP array
+      const [arr, bytesRead] = tryParseRESP(leftover.slice(offset));
+      if (!arr) break;
+      // Process as a write command, **but do NOT reply**
+      handleReplicaCommand(arr);
+      offset += bytesRead;
+    }
+    // Remove parsed bytes from buffer
+    leftover = leftover.slice(offset);
+  }
+
+  // Similar to your main command handler, but only for write commands
+  function handleReplicaCommand(cmdArr) {
+    if (!cmdArr || !cmdArr[0]) return;
+    const command = cmdArr[0].toLowerCase();
+    if (command === "set") {
+      const key = cmdArr[1];
+      const value = cmdArr[2];
+      let expiresAt = null;
+      if (cmdArr.length >= 5 && cmdArr[3].toLowerCase() === "px") {
+        const px = parseInt(cmdArr[4], 10);
+        expiresAt = Date.now() + px;
+      }
+      db[key] = { value, expiresAt };
+    }
+    // Add DEL, etc if needed!
+  }
+
+  // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
+  function tryParseRESP(buf) {
+    if (buf[0] !== 42) return [null, 0]; // not '*'
+    const str = buf.toString();
+    const firstLineEnd = str.indexOf('\r\n');
+    if (firstLineEnd === -1) return [null, 0];
+    const numElems = parseInt(str.slice(1, firstLineEnd), 10);
+    let elems = [];
+    let cursor = firstLineEnd + 2;
+    for (let i = 0; i < numElems; i++) {
+      if (buf[cursor] !== 36) return [null, 0]; // not '$'
+      const lenLineEnd = buf.indexOf('\r\n', cursor);
+      if (lenLineEnd === -1) return [null, 0];
+      const len = parseInt(buf.slice(cursor + 1, lenLineEnd).toString(), 10);
+      const valStart = lenLineEnd + 2;
+      const valEnd = valStart + len;
+      if (valEnd + 2 > buf.length) return [null, 0]; // incomplete value
+      const val = buf.slice(valStart, valEnd).toString();
+      elems.push(val);
+      cursor = valEnd + 2;
+    }
+    return [elems, cursor];
+  }
 }
+// ==== END OF REPLICA MODE CHANGES ====
 
 // === RDB FILE LOADING START ===
 // Reads all key-value pairs (string type) from RDB, supports expiries
@@ -377,7 +488,7 @@ server = net.createServer((connection) => {
 
 server.listen(port, "127.0.0.1"); // <-- use correct port!
 
-// RESP parser function
+// RESP parser function (used by master/client handlers, not replica stream)
 function parseRESP(buffer) {
   const str = buffer.toString();
 
