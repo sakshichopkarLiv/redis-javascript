@@ -38,19 +38,16 @@ for (let i = 0; i < args.length; i++) {
 // ==== REPLICA MODE: receive and apply commands from master ====
 if (role === "slave" && masterHost && masterPort) {
   const masterConnection = net.createConnection(masterPort, masterHost, () => {
-    // 1. Send PING as RESP
     masterConnection.write("*1\r\n$4\r\nPING\r\n");
   });
 
   let handshakeStep = 0;
   let awaitingRDB = false;
   let rdbBytesExpected = 0;
-  let leftover = Buffer.alloc(0); // For buffering incoming data
+  let leftover = Buffer.alloc(0); // Buffer for command data
 
   masterConnection.on("data", (data) => {
-    // During handshake stages
     if (handshakeStep === 0) {
-      // 2. After receiving response to PING, send REPLCONF listening-port <PORT>
       const portStr = port.toString();
       masterConnection.write(
         `*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$${portStr.length}\r\n${portStr}\r\n`
@@ -58,50 +55,20 @@ if (role === "slave" && masterHost && masterPort) {
       handshakeStep++;
       return;
     } else if (handshakeStep === 1) {
-      // 3. After response, send REPLCONF capa psync2
       masterConnection.write(
         "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
       );
       handshakeStep++;
       return;
     } else if (handshakeStep === 2) {
-      // 4. After response, send PSYNC ? -1
       masterConnection.write("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n");
       handshakeStep++;
       return;
     }
 
-    // After handshake: expect +FULLRESYNC ...\r\n$<n>\r\n<rdbfile>
-    if (!awaitingRDB) {
-      const str = data.toString();
-      if (str.startsWith("+FULLRESYNC")) {
-        // Find the $<n>\r\n for the RDB file
-        const idx = str.indexOf("\r\n$");
-        if (idx !== -1) {
-          const rest = str.slice(idx + 3);
-          const match = rest.match(/^(\d+)\r\n/);
-          if (match) {
-            rdbBytesExpected = parseInt(match[1], 10);
-            awaitingRDB = true;
-            // There might be some of the RDB file in this data already:
-            const rdbStart = idx + 3 + match[0].length;
-            const rdbAvailable = data.slice(rdbStart);
-            if (rdbAvailable.length >= rdbBytesExpected) {
-              // Skip RDB, process what's after it
-              const afterRDB = rdbAvailable.slice(rdbBytesExpected);
-              leftover = Buffer.concat([leftover, afterRDB]);
-              awaitingRDB = false;
-              processLeftover();
-            } else {
-              // We'll need to wait for more data for full RDB
-              rdbBytesExpected -= rdbAvailable.length;
-            }
-            return;
-          }
-        }
-      }
-    } else if (awaitingRDB) {
-      // Continue reading RDB bytes
+    // After handshake: receive RDB, then handle all incoming commands
+    if (awaitingRDB) {
+      // Still reading RDB file
       if (data.length >= rdbBytesExpected) {
         const afterRDB = data.slice(rdbBytesExpected);
         leftover = Buffer.concat([leftover, afterRDB]);
@@ -109,13 +76,42 @@ if (role === "slave" && masterHost && masterPort) {
         processLeftover();
       } else {
         rdbBytesExpected -= data.length;
-        // Still waiting for rest of RDB
+        // Still need more data for RDB
       }
       return;
-    } else {
-      // Already synced, buffer and process all incoming data
-      leftover = Buffer.concat([leftover, data]);
-      processLeftover();
+    }
+
+    if (!awaitingRDB) {
+      const str = data.toString();
+      if (str.startsWith("+FULLRESYNC")) {
+        // Parse $<length>\r\n then RDB
+        const idx = str.indexOf("\r\n$");
+        if (idx !== -1) {
+          const rest = str.slice(idx + 3);
+          const match = rest.match(/^(\d+)\r\n/);
+          if (match) {
+            rdbBytesExpected = parseInt(match[1], 10);
+            awaitingRDB = true;
+            const rdbStart = idx + 3 + match[0].length;
+            const rdbAvailable = data.slice(rdbStart);
+            if (rdbAvailable.length >= rdbBytesExpected) {
+              // We have whole RDB, handle what's after
+              const afterRDB = rdbAvailable.slice(rdbBytesExpected);
+              leftover = Buffer.concat([leftover, afterRDB]);
+              awaitingRDB = false;
+              processLeftover();
+            } else {
+              // Wait for the rest
+              rdbBytesExpected -= rdbAvailable.length;
+            }
+            return;
+          }
+        }
+      } else {
+        // Already past RDB, this is propagated command data!
+        leftover = Buffer.concat([leftover, data]);
+        processLeftover();
+      }
     }
   });
 
@@ -123,18 +119,14 @@ if (role === "slave" && masterHost && masterPort) {
     console.log("Error connecting to master:", err.message);
   });
 
-  // Helper to parse and apply all commands from the buffer
   function processLeftover() {
     let offset = 0;
     while (offset < leftover.length) {
-      // Try parsing a RESP array
       const [arr, bytesRead] = tryParseRESP(leftover.slice(offset));
       if (!arr) break;
-      // Process as a write command, **but do NOT reply**
       handleReplicaCommand(arr);
       offset += bytesRead;
     }
-    // Remove parsed bytes from buffer
     leftover = leftover.slice(offset);
   }
 
@@ -150,8 +142,10 @@ if (role === "slave" && masterHost && masterPort) {
         expiresAt = Date.now() + px;
       }
       db[key] = { value, expiresAt };
-      console.log("[replica] Applied SET", key, value);
+      // Debug: log when replica applies a SET from master
+      // console.log("[replica] SET from master:", key, value);
     }
+    // Add DEL, etc, if needed
   }
 
   // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
