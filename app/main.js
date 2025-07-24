@@ -414,19 +414,20 @@ server = net.createServer((connection) => {
       }
     } else if (command === "incr") {
       const key = cmdArr[1];
-      // If the key does not exist, set it to "1" (string!) and reply :1\r\n
-      if (!db[key]) {
+      if (db[key] === undefined) {
+        // Key does not exist: set to 1
         db[key] = { value: "1", type: "string" };
         connection.write(encodeRespInteger(1));
-      }
-      // If key exists and is a string that looks like an integer
-      else if (db[key].type === "string" && /^-?\d+$/.test(db[key].value)) {
+      } else if (db[key].type === "string" && /^-?\d+$/.test(db[key].value)) {
+        // Key exists and value is integer: increment
         let num = parseInt(db[key].value, 10);
         num += 1;
         db[key].value = num.toString();
         connection.write(encodeRespInteger(num));
+      } else {
+        // Key exists but value is NOT an integer
+        connection.write("-ERR value is not an integer or out of range\r\n");
       }
-      // (else: do nothing for non-integer/non-string keys at this stage)
     } else if (command === "xadd") {
       // XADD command: Add to stream, handle IDs (full/partial/auto), error checks
       const streamKey = cmdArr[1];
