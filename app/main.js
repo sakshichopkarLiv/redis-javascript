@@ -469,6 +469,19 @@ server = net.createServer((connection) => {
         // Null bulk string if key doesn't exist
         connection.write("$-1\r\n");
       }
+    } else if (command === "incr") {
+      const key = cmdArr[1];
+      if (
+        db[key] &&
+        db[key].type === "string" &&
+        /^-?\d+$/.test(db[key].value)
+      ) {
+        let num = parseInt(db[key].value, 10);
+        num += 1;
+        db[key].value = num.toString();
+        connection.write(encodeRespInteger(num));
+      }
+      // (else: do nothing, for this stage)
     } else if (command === "xadd") {
       // ==== STREAM SUPPORT START + VALIDATION ====
       const streamKey = cmdArr[1];
