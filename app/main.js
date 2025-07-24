@@ -441,46 +441,56 @@ server = net.createServer((connection) => {
       const streamKey = cmdArr[1];
       let id = cmdArr[2];
 
-      // Accept two types of IDs:
-      //   1. <ms>-<seq> (both numbers)
-      //   2. <ms>-*    (auto-increment sequence number)
-      let ms,
-        seq,
-        isAutoSeq = false;
+      // New: Support full auto-id "*"
+      let ms, seq;
 
-      if (/^\d+-\*$/.test(id)) {
-        // e.g. "5-*"
-        isAutoSeq = true;
-        ms = parseInt(id.split("-")[0], 10);
-
-        // Find what seq should be
-        let seqToUse = 0;
-        if (!db[streamKey]) {
-          // No stream exists yet
-          seqToUse = ms === 0 ? 1 : 0;
-        } else {
+      if (id === "*") {
+        ms = Date.now();
+        seq = 0;
+        // If stream already has entries with this ms, increment sequence
+        if (db[streamKey] && db[streamKey].entries.length > 0) {
+          // Find last entry with this ms
           const entries = db[streamKey].entries;
-          // Look for last entry with this ms, else start from 0 (or 1 if ms==0)
-          let maxSeq = ms === 0 ? 0 : -1;
-          for (const entry of entries) {
-            const [eMs, eSeq] = entry.id.split("-").map(Number);
-            if (eMs === ms && eSeq > maxSeq) maxSeq = eSeq;
+          const last = entries[entries.length - 1];
+          const [lastMs, lastSeq] = last.id.split("-").map(Number);
+          if (lastMs === ms) {
+            seq = lastSeq + 1;
           }
-          seqToUse = maxSeq + 1;
-          // For ms==0, first entry should be 1
-          if (ms === 0 && maxSeq < 1) seqToUse = 1;
         }
-        seq = seqToUse;
         id = `${ms}-${seq}`;
-      } else if (/^\d+-\d+$/.test(id)) {
-        [ms, seq] = id.split("-").map(Number);
-      } else {
-        // Not valid
+      }
+      // New: Support auto-sequence e.g. 123-*
+      else if (/^\d+-\*$/.test(id)) {
+        ms = Number(id.split("-")[0]);
+        seq = 0;
+        if (db[streamKey] && db[streamKey].entries.length > 0) {
+          // Find last seq for this ms
+          const entries = db[streamKey].entries;
+          let maxSeq = -1;
+          for (let i = entries.length - 1; i >= 0; i--) {
+            const [entryMs, entrySeq] = entries[i].id.split("-").map(Number);
+            if (entryMs === ms) {
+              maxSeq = Math.max(maxSeq, entrySeq);
+            }
+            // Optimization: break early
+            if (entryMs < ms) break;
+          }
+          if (maxSeq >= 0) seq = maxSeq + 1;
+          else seq = ms === 0 ? 1 : 0;
+        } else {
+          seq = ms === 0 ? 1 : 0;
+        }
+        id = `${ms}-${seq}`;
+      }
+
+      // Validate id: must match <millisecondsTime>-<sequenceNumber>
+      if (!/^\d+-\d+$/.test(id)) {
         connection.write(
           "-ERR The ID specified in XADD must be greater than 0-0\r\n"
         );
         return;
       }
+      [ms, seq] = id.split("-").map(Number);
 
       // ID must be greater than 0-0
       if (ms === 0 && seq === 0) {
@@ -505,7 +515,7 @@ server = net.createServer((connection) => {
 
       if (!db[streamKey]) {
         db[streamKey] = { type: "stream", entries: [] };
-      } else if (!isAutoSeq) {
+      } else {
         // Validate the new ID is strictly greater than the last entry's ID
         const entries = db[streamKey].entries;
         if (entries.length > 0) {
