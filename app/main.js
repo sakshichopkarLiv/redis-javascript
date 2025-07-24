@@ -439,16 +439,48 @@ server = net.createServer((connection) => {
     } else if (command === "xadd") {
       // ==== STREAM SUPPORT START + VALIDATION ====
       const streamKey = cmdArr[1];
-      const id = cmdArr[2];
+      let id = cmdArr[2];
 
-      // Validate id: must match <millisecondsTime>-<sequenceNumber>
-      if (!/^\d+-\d+$/.test(id)) {
+      // Accept two types of IDs:
+      //   1. <ms>-<seq> (both numbers)
+      //   2. <ms>-*    (auto-increment sequence number)
+      let ms,
+        seq,
+        isAutoSeq = false;
+
+      if (/^\d+-\*$/.test(id)) {
+        // e.g. "5-*"
+        isAutoSeq = true;
+        ms = parseInt(id.split("-")[0], 10);
+
+        // Find what seq should be
+        let seqToUse = 0;
+        if (!db[streamKey]) {
+          // No stream exists yet
+          seqToUse = ms === 0 ? 1 : 0;
+        } else {
+          const entries = db[streamKey].entries;
+          // Look for last entry with this ms, else start from 0 (or 1 if ms==0)
+          let maxSeq = ms === 0 ? 0 : -1;
+          for (const entry of entries) {
+            const [eMs, eSeq] = entry.id.split("-").map(Number);
+            if (eMs === ms && eSeq > maxSeq) maxSeq = eSeq;
+          }
+          seqToUse = maxSeq + 1;
+          // For ms==0, first entry should be 1
+          if (ms === 0 && maxSeq < 1) seqToUse = 1;
+        }
+        seq = seqToUse;
+        id = `${ms}-${seq}`;
+      } else if (/^\d+-\d+$/.test(id)) {
+        [ms, seq] = id.split("-").map(Number);
+      } else {
+        // Not valid
         connection.write(
           "-ERR The ID specified in XADD must be greater than 0-0\r\n"
         );
         return;
       }
-      const [ms, seq] = id.split("-").map(Number);
 
       // ID must be greater than 0-0
       if (ms === 0 && seq === 0) {
@@ -473,7 +505,7 @@ server = net.createServer((connection) => {
 
       if (!db[streamKey]) {
         db[streamKey] = { type: "stream", entries: [] };
-      } else {
+      } else if (!isAutoSeq) {
         // Validate the new ID is strictly greater than the last entry's ID
         const entries = db[streamKey].entries;
         if (entries.length > 0) {
